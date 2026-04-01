@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 import numpy as np
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
+st.set_page_config(page_title="Tío Bigotes Pro", layout="wide", initial_sidebar_state="collapsed")
 
 # --- CONEXIÓN ROBUSTA A SUPABASE ---
 try:
@@ -44,13 +44,134 @@ if st.session_state.pantalla == 'Home':
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🧠 1. DASHBOARD & IA PREDICTIVA"): ir_a('Dashboard')
-        if st.button("📦 GESTIÓN PRODUCTOS"): ir_a('Productos')
+        if st.button("📈 1. BI & ANALÍTICA (NUEVO)"): ir_a('BI')
+        if st.button("🧠 2. IA PREDICTIVA"): ir_a('Dashboard')
     with col2:
-        if st.button("📋 2. HOJA CONTROL DIARIO"): ir_a('Operativa')
-        if st.button("👥 GESTIÓN EMPLEADOS"): ir_a('Empleados')
+        if st.button("📋 3. HOJA CONTROL DIARIO"): ir_a('Operativa')
+        if st.button("📦 GESTIÓN PRODUCTOS"): ir_a('Productos')
     with col3:
-        if st.button("📥 3. CARGAR HISTORIAL CSV"): ir_a('Carga')
+        if st.button("📥 4. CARGAR HISTORIAL CSV"): ir_a('Carga')
+        if st.button("👥 GESTIÓN EMPLEADOS"): ir_a('Empleados')
+
+# ==========================================
+#        PANTALLA: BI & ANALÍTICA (NUEVO)
+# ==========================================
+elif st.session_state.pantalla == 'BI':
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
+    st.title("📈 Business Intelligence: Tío Bigotes")
+
+    # Selector de fecha (Por defecto: Ayer, porque hoy aún no ha cerrado)
+    ayer_default = datetime.date.today() - datetime.timedelta(days=1)
+    fecha_analisis = st.date_input("Fecha de Análisis (Cierre):", value=ayer_default)
+    
+    # Cálculos de fechas comerciales
+    f_ayer = pd.to_datetime(fecha_analisis)
+    f_w1 = f_ayer - pd.Timedelta(days=7) # Semana anterior
+    f_ly = f_ayer - pd.Timedelta(days=364) # Año pasado (52 semanas para comparar mismos días)
+    
+    # Acumulado Mes (MTD - Month To Date)
+    f_mtd_inicio = f_ayer.replace(day=1)
+
+    @st.cache_data(ttl=600)
+    def cargar_datos_bi():
+        # Cargamos ventas
+        res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto, productos(nombre)").execute()
+        df_v = pd.DataFrame(res_v.data) if res_v.data else pd.DataFrame()
+        
+        # Cargamos mermas (control_diario)
+        res_m = conn.table("control_diario").select("fecha, producto_id, merma").execute()
+        df_m = pd.DataFrame(res_m.data) if res_m.data else pd.DataFrame()
+        
+        if not df_v.empty:
+            df_v['fecha'] = pd.to_datetime(df_v['fecha'])
+            df_v['Producto'] = df_v['productos'].apply(lambda x: x['nombre'] if x else 'Desc')
+        if not df_m.empty:
+            df_m['fecha'] = pd.to_datetime(df_m['fecha'])
+            
+        return df_v, df_m
+
+    df_ventas, df_merma = cargar_datos_bi()
+
+    if df_ventas.empty:
+        st.warning("No hay datos de ventas suficientes para mostrar el Dashboard.")
+    else:
+        # --- FILTRADO DE DATOS POR FECHA ---
+        # Ventas
+        v_ayer = df_ventas[df_ventas['fecha'] == f_ayer]
+        v_w1 = df_ventas[df_ventas['fecha'] == f_w1]
+        v_ly = df_ventas[df_ventas['fecha'] == f_ly]
+        v_mtd = df_ventas[(df_ventas['fecha'] >= f_mtd_inicio) & (df_ventas['fecha'] <= f_ayer)]
+        
+        # Mermas
+        m_ayer = df_merma[df_merma['fecha'] == f_ayer]['merma'].sum() if not df_merma.empty else 0
+        m_w1 = df_merma[df_merma['fecha'] == f_w1]['merma'].sum() if not df_merma.empty else 0
+        m_ly = df_merma[df_merma['fecha'] == f_ly]['merma'].sum() if not df_merma.empty else 0
+
+        # --- KPIs PRINCIPALES ---
+        fact_ayer = v_ayer['total_neto'].sum()
+        fact_w1 = v_w1['total_neto'].sum()
+        fact_ly = v_ly['total_neto'].sum()
+        
+        uds_ayer = v_ayer['cantidad_vendida'].sum()
+        uds_w1 = v_w1['cantidad_vendida'].sum()
+        uds_ly = v_ly['cantidad_vendida'].sum()
+
+        # Objetivos
+        obj_fact = fact_ly * 1.15  # Objetivo: +15% vs Last Year
+        obj_merma = uds_ayer * 0.01 # Objetivo: < 1% de las unidades vendidas
+
+        st.markdown("### 📊 Panel de Rendimiento (KPIs Diarios)")
+        c1, c2, c3, c4 = st.columns(4)
+
+        # 1. Ventas €
+        delta_ly_eur = ((fact_ayer / fact_ly) - 1) * 100 if fact_ly > 0 else 0
+        c1.metric("Ventas (€)", f"{fact_ayer:,.2f} €", f"{delta_ly_eur:.1f}% vs LY")
+        if fact_ayer >= obj_fact and obj_fact > 0:
+            c1.caption(f"✅ Objetivo Superado (+15% LY: {obj_fact:.2f}€)")
+        elif obj_fact > 0:
+            c1.caption(f"⚠️ Por debajo de Objetivo ({obj_fact:.2f}€)")
+
+        # 2. Ventas Unidades
+        delta_w1_uds = ((uds_ayer / uds_w1) - 1) * 100 if uds_w1 > 0 else 0
+        c2.metric("Unidades Vendidas", f"{uds_ayer:,.0f} uds", f"{delta_w1_uds:.1f}% vs W-1")
+
+        # 3. Merma Diaria
+        delta_merma_w1 = m_ayer - m_w1
+        merma_color = "normal" if delta_merma_w1 <= 0 else "inverse" # Rojo si sube
+        c3.metric("Merma (Uds)", f"{m_ayer:,.0f} uds", f"{delta_merma_w1:+.0f} uds vs W-1", delta_color=merma_color)
+
+        # 4. % Merma vs Objetivo
+        pct_merma = (m_ayer / uds_ayer) * 100 if uds_ayer > 0 else 0
+        if pct_merma <= 1.0:
+            c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", "✅ Cumple Obj < 1%")
+        else:
+            c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", f"❌ Exc. Obj (< 1%)", delta_color="inverse")
+
+        st.divider()
+
+        # --- RANKINGS DE PRODUCTOS ---
+        st.markdown("### 🏆 Ranking de Productos")
+        col_rank1, col_rank2 = st.columns(2)
+
+        with col_rank1:
+            st.subheader(f"Top Ventas: Ayer ({fecha_analisis.strftime('%d/%m')})")
+            if not v_ayer.empty:
+                rank_ayer = v_ayer.groupby('Producto')['cantidad_vendida'].sum().reset_index()
+                rank_ayer = rank_ayer.sort_values(by='cantidad_vendida', ascending=False).head(10)
+                rank_ayer.index += 1
+                st.dataframe(rank_ayer.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
+            else:
+                st.info("No hay ventas registradas en esta fecha.")
+
+        with col_rank2:
+            st.subheader("Top Ventas: Acumulado Mes (MTD)")
+            if not v_mtd.empty:
+                rank_mtd = v_mtd.groupby('Producto')['cantidad_vendida'].sum().reset_index()
+                rank_mtd = rank_mtd.sort_values(by='cantidad_vendida', ascending=False).head(10)
+                rank_mtd.index += 1
+                st.dataframe(rank_mtd.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
+            else:
+                st.info("No hay ventas en lo que va de mes.")
 
 # ==========================================
 #        PANTALLA: GESTIÓN EMPLEADOS
@@ -59,27 +180,56 @@ elif st.session_state.pantalla == 'Empleados':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
     st.header("👥 Gestión de Personal y Roles")
     
-    with st.expander("➕ Dar de alta nuevo empleado"):
-        with st.form("nuevo_emp"):
-            nom = st.text_input("Nombre Completo")
-            rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
-            if st.form_submit_button("Guardar Empleado"):
-                try:
-                    conn.table("empleados").insert({"nombre": nom, "rol": rol}).execute()
-                    st.success(f"Empleado '{nom}' dado de alta exitosamente.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error al guardar empleado: {e}")
+    try:
+        res_emp = conn.table("empleados").select("id, nombre, rol").eq("activo", True).execute()
+        lista_empleados = res_emp.data if res_emp.data else []
+        dic_empleados = {e['nombre']: e for e in lista_empleados}
+    except:
+        lista_empleados = []
+        dic_empleados = {}
+
+    if dic_empleados:
+        usuario_actual = st.selectbox("🔒 Identifícate para gestionar:", ["Selecciona tu nombre..."] + list(dic_empleados.keys()))
+        es_supervisor = False
+        if usuario_actual != "Selecciona tu nombre...":
+            rol_actual = dic_empleados[usuario_actual]['rol']
+            st.caption(f"Logueado como: **{rol_actual.upper()}**")
+            if rol_actual == 'supervisor': es_supervisor = True
+    else:
+        st.warning("No hay empleados en el sistema. Crea el primer SUPERVISOR.")
+        es_supervisor = True
+
+    st.divider()
+
+    if es_supervisor:
+        with st.expander("➕ Dar de alta nuevo empleado"):
+            with st.form("nuevo_emp"):
+                nom = st.text_input("Nombre Completo")
+                rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
+                if st.form_submit_button("Guardar Empleado"):
+                    try:
+                        conn.table("empleados").insert({"nombre": nom, "rol": rol}).execute()
+                        st.success(f"Empleado '{nom}' dado de alta exitosamente.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al guardar empleado: {e}")
+    elif usuario_actual != "Selecciona tu nombre...":
+         st.info("ℹ️ Solo los Supervisores pueden crear nuevos empleados.")
 
     st.subheader("Personal Actual")
-    try:
-        res_e = conn.table("empleados").select("nombre, rol").eq("activo", True).execute()
-        if res_e.data:
-            st.dataframe(pd.DataFrame(res_e.data), use_container_width=True)
-        else:
-            st.info("No hay empleados activos.")
-    except Exception as e:
-        st.error(f"Error cargando empleados: {e}")
+    if lista_empleados:
+        for emp in lista_empleados:
+            col1, col2 = st.columns([3, 1])
+            col1.write(f"👤 **{emp['nombre']}** - ({emp['rol']})")
+            if es_supervisor:
+                if col2.button("Dar de Baja ❌", key=f"del_{emp['id']}"):
+                    try:
+                        conn.table("empleados").update({"activo": False}).eq("id", emp['id']).execute()
+                        st.success(f"Empleado dado de baja.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al dar de baja: {e}")
+            st.divider()
 
 # ==========================================
 #        PANTALLA: HOJA CONTROL DIARIO
@@ -88,7 +238,6 @@ elif st.session_state.pantalla == 'Operativa':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
     st.title("📋 Hoja de Control de Tienda")
 
-    # 1. IDENTIFICACIÓN
     col_f, col_e = st.columns(2)
     fecha_sel = col_f.date_input("Fecha de trabajo:", datetime.date.today())
     
@@ -99,13 +248,12 @@ elif st.session_state.pantalla == 'Operativa':
         emps = {}
         
     if not emps:
-        st.error("⚠️ Debes dar de alta empleados en la sección 'Gestión Empleados' primero.")
+        st.error("⚠️ Debes dar de alta empleados primero.")
         st.stop()
     emp_sel = col_e.selectbox("Empleado responsable:", list(emps.keys()))
 
     st.divider()
 
-    # 2. CARGAR PRODUCTOS Y RESTO DE AYER
     res_p = conn.table("productos").select("id, nombre, categoria").execute()
     df_prod = pd.DataFrame(res_p.data)
 
@@ -114,10 +262,9 @@ elif st.session_state.pantalla == 'Operativa':
     try:
         res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
         dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
-    except Exception:
+    except:
         pass 
 
-    # 3. PREPARAR TABLA PARA EDITAR
     data_hoja = []
     for _, row in df_prod.iterrows():
         st_ayer = dict_ayer.get(row['id'], 0)
@@ -132,8 +279,6 @@ elif st.session_state.pantalla == 'Operativa':
         })
 
     df_base = pd.DataFrame(data_hoja)
-
-    st.subheader("📝 Introduce los movimientos del día")
     edited_df = st.data_editor(
         df_base,
         column_config={
@@ -148,14 +293,12 @@ elif st.session_state.pantalla == 'Operativa':
         hide_index=True, use_container_width=True, key="hoja_diaria"
     )
 
-    # 4. CALCULAR VENTAS
     edited_df["Ventas"] = edited_df["Stock Inicial"] + edited_df["Horneados"] - edited_df["Merma"] - edited_df["Resto (Cierre)"]
 
     st.divider()
 
-    # 5. GUARDAR DATOS
-    if st.button("💾 GRABAR TODOS LOS DATOS Y LIMPIAR"):
-        with st.spinner("Guardando registro en la base de datos..."):
+    if st.button("💾 GRABAR TODOS LOS DATOS"):
+        with st.spinner("Guardando..."):
             try:
                 lote = []
                 for _, row in edited_df.iterrows():
@@ -170,38 +313,38 @@ elif st.session_state.pantalla == 'Operativa':
                             "resto": int(row["Resto (Cierre)"]),
                             "desviacion_inicial": int(row["Stock Inicial"] - dict_ayer.get(row["ID"], 0))
                         })
-                
                 if lote:
                     conn.table("control_diario").insert(lote).execute()
-                    st.success(f"✅ ¡Guardado con éxito! {len(lote)} productos procesados.")
-                    st.balloons()
-                else:
-                    st.info("No se han detectado movimientos para guardar.")
+                    st.success("✅ ¡Guardado!")
+                    st.rerun()
             except Exception as e:
-                st.error(f"Error al guardar: {e}.")
+                st.error(f"Error: {e}")
 
 # ==========================================
 #        PANTALLA: DASHBOARD & IA PREDICTIVA
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva de Horneado (Nivel Nacional)")
+    st.title("🧠 IA Predictiva de Horneado")
     
-    st.info("💡 La IA está analizando estacionalidad, tendencias y el calendario de festivos de España...")
+    st.markdown("### 📅 Configuración de la Previsión")
+    col_d, col_b = st.columns([2, 1])
+    
+    fecha_pred = col_d.date_input("Fecha para la cual quieres la previsión:", datetime.date.today())
+    confirmar_ia = col_b.button("✅ CONFIRMAR Y GENERAR")
 
-    @st.cache_data(ttl=3600, show_spinner="Entrenando IA y cruzando calendario de festivos... ⏳")
-    def entrenar_ia():
+    @st.cache_data(ttl=3600, show_spinner="Analizando patrones históricos... ⏳")
+    def entrenar_ia(fecha_objetivo):
         try:
             import holidays
-            años_historial = [2022, 2023, 2024, 2025, 2026, 2027]
-            festivos_nacionales = holidays.Spain(years=años_historial)
+            años_lista = [2022, 2023, 2024, 2025, 2026, 2027]
+            festivos = holidays.Spain(years=años_lista)
 
             res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
-            if not res_v.data: return None, "⚠️ La tabla de historial está vacía."
+            if not res_v.data: return None, "⚠️ Historial vacío."
             df_v = pd.DataFrame(res_v.data)
             
             res_p = conn.table("productos").select("id, nombre").execute()
-            if not res_p.data: return None, "⚠️ No hay productos."
             df_p = pd.DataFrame(res_p.data)
             
             df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
@@ -215,61 +358,58 @@ elif st.session_state.pantalla == 'Dashboard':
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
             df_diario['Mes'] = df_diario['fecha'].dt.month
             df_diario['Año'] = df_diario['fecha'].dt.year
-            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_nacionales else 0)
-            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_nacionales else 0)
+            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos else 0)
+            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos else 0)
             
-            fecha_hoy = pd.to_datetime(datetime.date.today())
+            f_obj = pd.to_datetime(fecha_objetivo)
             hoy_features = pd.DataFrame({
-                'Dia_Semana': [fecha_hoy.dayofweek], 
-                'Dia_Mes': [fecha_hoy.day],
-                'Mes': [fecha_hoy.month], 
-                'Año': [fecha_hoy.year],
-                'Es_Festivo': [1 if fecha_hoy in festivos_nacionales else 0],
-                'Es_Vispera': [1 if (fecha_hoy + pd.Timedelta(days=1)) in festivos_nacionales else 0]
+                'Dia_Semana': [f_obj.dayofweek], 
+                'Dia_Mes': [f_obj.day],
+                'Mes': [f_obj.month], 
+                'Año': [f_obj.year],
+                'Es_Festivo': [1 if f_obj in festivos else 0],
+                'Es_Vispera': [1 if (f_obj + pd.Timedelta(days=1)) in festivos else 0]
             })
 
             predicciones = []
             for prod in df_diario['Producto'].unique():
                 if prod == 'Desconocido': continue
-                
                 datos_prod = df_diario[df_diario['Producto'] == prod]
                 if len(datos_prod) > 3: 
                     X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año', 'Es_Festivo', 'Es_Vispera']]
                     y = datos_prod['cantidad_vendida']
-                    
                     modelo = RandomForestRegressor(n_estimators=100, random_state=42)
                     modelo.fit(X, y)
                     pred = modelo.predict(hoy_features)[0]
-                    
                     predicciones.append({
                         "Producto": prod,
-                        "Previsión IA (Uds)": max(0, int(round(pred))),
-                        "Días Históricos": len(datos_prod)
+                        "Previsión IA (Uds)": max(0, int(round(pred)))
                     })
             
-            df_resultados = pd.DataFrame(predicciones)
-            if df_resultados.empty:
-                return None, "⚠️ Se leyeron ventas, pero ningún producto tiene más de 3 días de historial."
-                
-            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ IA entrenada con **{len(df_v)} registros**, analizando el calendario de España."
+            df_res = pd.DataFrame(predicciones)
+            if df_res.empty: return None, "⚠️ Sin datos suficientes."
+            return df_res.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ Previsión generada para el día {fecha_objetivo}"
             
         except Exception as e:
-            return None, f"❌ Error interno de la IA: {e}"
+            return None, f"❌ Error: {e}"
 
-    df_prev, mensaje = entrenar_ia()
-    
-    st.write(mensaje)
-    
-    if df_prev is not None and not df_prev.empty:
-        col_t, col_g = st.columns([1, 1.5])
-        with col_t:
-            st.subheader("🎯 Sugerencia para HOY")
-            st.dataframe(df_prev[['Producto', 'Previsión IA (Uds)']], hide_index=True, use_container_width=True)
-        with col_g:
-            st.subheader("Gráfico de Demanda")
-            fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
-            fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
+    if confirmar_ia:
+        st.divider()
+        df_prev, mensaje = entrenar_ia(fecha_pred)
+        st.write(mensaje)
+        
+        if df_prev is not None:
+            c_t, c_g = st.columns([1, 1.5])
+            with c_t:
+                st.subheader(f"🎯 Sugerencia para el {fecha_pred}")
+                st.dataframe(df_prev, hide_index=True, use_container_width=True)
+            with c_g:
+                st.subheader("Tendencia de demanda")
+                fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
+                fig.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("ℹ️ Selecciona la fecha arriba y pulsa el botón para activar la IA.")
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
@@ -289,11 +429,9 @@ elif st.session_state.pantalla == 'Carga':
         except:
             m_prev = {}
         
-        st.subheader("⚙️ Configurar Columnas")
         campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago"]
         nuevo_mapeo = {}
         cols = st.columns(len(campos_db))
-        
         for i, c_db in enumerate(campos_db):
             idx = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
             nuevo_mapeo[c_db] = cols[i].selectbox(c_db, cabeceras, index=idx)
@@ -310,54 +448,80 @@ elif st.session_state.pantalla == 'Carga':
         nuevos = [n for n in nombres_csv if n and n not in dict_db]
 
         if nuevos:
-            st.warning(f"🔎 {len(nuevos)} productos nuevos detectados en el CSV.")
-            seleccionados = st.multiselect("Crear estos productos:", nuevos, default=[])
-            if seleccionados:
-                c_cat, c_pre = st.columns(2)
-                cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
-                pre_m = c_pre.number_input("Precio base (€):", value=0.0)
-                if st.button("✅ CREAR SELECCIONADOS"):
-                    ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
-                    conn.table("productos").insert(ins_list).execute()
-                    st.success("Productos creados correctamente.")
-                    st.rerun()
-        else:
-            st.info("✅ Todos los productos del CSV ya existen en la base de datos.")
-            if st.button("🚀 INICIAR SUBIDA MASIVA"):
-                progreso = st.progress(0)
-                lote, cont = [], 0
-                for i, fila in df.iterrows():
-                    nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
-                    if nom in dict_db:
-                        try:
-                            neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
-                            lote.append({
-                                "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
-                                "producto_id": dict_db[nom],
-                                "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
-                                "total_neto": float(neto),
-                                "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
-                            })
-                        except: pass
-                    
-                    if len(lote) >= 1000 or i == len(df) - 1:
-                        if lote:
-                            conn.table("historial_ventas").insert(lote).execute()
-                            cont += len(lote)
-                            lote = []
-                        progreso.progress((i + 1) / len(df))
-                st.success(f"🎊 ¡Proceso terminado! {cont} registros subidos con éxito.")
-                st.balloons()
+            st.warning(f"🔎 {len(nuevos)} productos nuevos.")
+            seleccionados = st.multiselect("Crear:", nuevos)
+            if seleccionados and st.button("✅ CREAR"):
+                ins = [{"nombre": n, "categoria": "Empanada", "precio_unidad": 0.0} for n in seleccionados]
+                conn.table("productos").insert(ins).execute()
+                st.rerun()
+        
+        if st.button("🚀 INICIAR SUBIDA MASIVA"):
+            progreso = st.progress(0)
+            lote, cont = [], 0
+            for i, fila in df.iterrows():
+                nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
+                if nom in dict_db:
+                    try:
+                        neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
+                        lote.append({
+                            "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
+                            "producto_id": dict_db[nom],
+                            "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
+                            "total_neto": float(neto),
+                            "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
+                        })
+                    except: pass
+                if len(lote) >= 1000 or i == len(df) - 1:
+                    if lote:
+                        conn.table("historial_ventas").insert(lote).execute()
+                        cont += len(lote)
+                        lote = []
+                    progreso.progress((i + 1) / len(df))
+            st.success(f"🎊 ¡{cont} registros subidos!")
 
 # ==========================================
 #        PANTALLA: PRODUCTOS
 # ==========================================
 elif st.session_state.pantalla == 'Productos':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.header("📦 Listado de Productos")
+    st.header("📦 Gestión de Productos")
+    
+    try:
+        res_emp = conn.table("empleados").select("id, nombre, rol").eq("activo", True).execute()
+        dic_empleados = {e['nombre']: e for e in res_emp.data} if res_emp.data else {}
+    except:
+        dic_empleados = {}
+
+    if dic_empleados:
+        usuario_actual = st.selectbox("🔒 Identifícate:", ["Selecciona tu nombre..."] + list(dic_empleados.keys()))
+        es_supervisor = False
+        if usuario_actual != "Selecciona tu nombre...":
+            if dic_empleados[usuario_actual]['rol'] == 'supervisor':
+                es_supervisor = True
+    else:
+        st.warning("⚠️ Crea empleados primero.")
+        es_supervisor = False
+
+    st.divider()
+
     try:
         res = conn.table("productos").select("*").execute()
         if res.data:
-            st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+            df_prods = pd.DataFrame(res.data)
+            st.subheader("Catálogo de Productos")
+            for _, prod in df_prods.iterrows():
+                col1, col2 = st.columns([4, 1])
+                col1.write(f"🥟 **{prod['nombre']}** - ({prod['categoria']})")
+                if es_supervisor:
+                    if col2.button("Eliminar 🗑️", key=f"del_prod_{prod['id']}"):
+                        try:
+                            conn.table("productos").delete().eq("id", prod['id']).execute()
+                            st.success("Producto eliminado.")
+                            st.rerun()
+                        except Exception:
+                            st.error(f"No se puede borrar porque tiene ventas asociadas.")
+                st.divider()
+        else:
+            st.info("No hay productos.")
     except Exception as e:
         st.error(f"Error cargando productos: {e}")
