@@ -9,27 +9,10 @@ import plotly.express as px
 st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
 
 # --- CONEXIÓN ROBUSTA ---
-def conectar():
-    try:
-        # Intento 1: Conexión estándar
-        return st.connection("supabase", type=SupabaseConnection)
-    except:
-        try:
-            # Intento 2: Conexión manual usando los secrets directamente
-            return st.connection(
-                "supabase_manual",
-                type=SupabaseConnection,
-                url=st.secrets["connections"]["supabase"]["url"],
-                key=st.secrets["connections"]["supabase"]["key"]
-            )
-        except Exception as e:
-            st.error(f"❌ No se pudo establecer la conexión: {e}")
-            return None
-
-conn = conectar()
-
-if conn is None:
-    st.info("💡 Consejo: Revisa que en Settings > Secrets el bloque empiece por [connections.supabase]")
+try:
+    conn = st.connection("supabase", type=SupabaseConnection)
+except Exception as e:
+    st.error(f"Error de conexión: {e}")
     st.stop()
 
 # --- FUNCIONES AUXILIARES ---
@@ -38,15 +21,17 @@ def limpiar_nombre(texto):
     texto = re.sub(r'^\d+[\.\s\-]*', '', texto)
     return texto.strip()
 
-if 'pantalla' not in st.session_state: st.session_state.pantalla = 'Home'
-def ir_a(p): st.session_state.pantalla = p
+if 'pantalla' not in st.session_state: 
+    st.session_state.pantalla = 'Home'
+
+def ir_a(p): 
+    st.session_state.pantalla = p
 
 # ==========================================
 #             PANTALLA: HOME
 # ==========================================
 if st.session_state.pantalla == 'Home':
     st.title("🥐 Tío Bigotes - Gestión Total")
-    st.write("Conexión establecida correctamente ✅")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📊 1. VER DASHBOARD"): ir_a('Dashboard')
@@ -96,7 +81,6 @@ elif st.session_state.pantalla == 'Carga':
             if nuevos:
                 st.warning(f"🔎 Se han detectado {len(nuevos)} productos nuevos.")
                 with st.container(border=True):
-                    st.write("### Creación Masiva")
                     seleccionados = st.multiselect("Crear estos productos:", nuevos, default=nuevos)
                     c_cat, c_pre = st.columns(2)
                     cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
@@ -124,7 +108,8 @@ elif st.session_state.pantalla == 'Carga':
                                 "total_neto": float(neto),
                                 "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
                             })
-                        except: pass
+                        except:
+                            pass
 
                         if len(lote) >= 1000 or i == total - 1:
                             if lote:
@@ -136,17 +121,40 @@ elif st.session_state.pantalla == 'Carga':
         except Exception as e:
             st.error(f"Error general en la carga: {e}")
 
-# [Resto de pantallas: Productos, Operativa, Dashboard]
+# ==========================================
+#        PANTALLA: PRODUCTOS
+# ==========================================
 elif st.session_state.pantalla == 'Productos':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📦 Productos")
-    res = conn.table("productos").select("*").execute()
-    if res.data: st.dataframe(pd.DataFrame(res.data))
+    st.header("📦 Listado de Productos")
+    try:
+        res = conn.table("productos").select("*").execute()
+        if res.data:
+            st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+    except:
+        st.error("No se pudo cargar la lista de productos.")
 
-elif st.session_state.pantalla == 'Operativa':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.write("Pantalla operativa")
-
+# ==========================================
+#        PANTALLA: DASHBOARD
+# ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.write("Dashboard")
+    st.header("📊 Análisis Visual")
+    st.info("Cargando resumen de ventas...")
+    try:
+        res = conn.table("historial_ventas").select("fecha, total_neto").limit(5000).execute()
+        if res.data:
+            df_v = pd.DataFrame(res.data)
+            df_v['fecha'] = pd.to_datetime(df_v['fecha'])
+            fig = px.line(df_v.groupby('fecha')['total_neto'].sum().reset_index(), x='fecha', y='total_neto')
+            st.plotly_chart(fig, use_container_width=True)
+    except:
+        st.error("Error al cargar datos del Dashboard.")
+
+# ==========================================
+#        PANTALLA: OPERATIVA
+# ==========================================
+elif st.session_state.pantalla == 'Operativa':
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.header("🔥 Control de Horno")
+    st.write("Registra aquí el movimiento diario.")
