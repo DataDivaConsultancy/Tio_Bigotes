@@ -190,24 +190,28 @@ elif st.session_state.pantalla == 'Dashboard':
     
     st.info("💡 El modelo de Random Forest está analizando la estacionalidad, tendencias y días de mes de tu historial...")
 
-    @st.cache_data(ttl=3600)
+    # Le ponemos un "spinner" para que veas que está pensando
+    @st.cache_data(ttl=3600, show_spinner="Entrenando árboles de decisión... esto puede tardar unos segundos ⏳")
     def entrenar_ia():
         try:
-            # 1. Traemos ventas y productos por separado (Evita error PGRST200)
+            # 1. Traemos ventas
             res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
-            if not res_v.data: return None
+            if not res_v.data: 
+                return None, "⚠️ La tabla 'historial_ventas' está vacía. Necesitas subir el CSV primero."
             df_v = pd.DataFrame(res_v.data)
             
+            # 2. Traemos productos
             res_p = conn.table("productos").select("id, nombre").execute()
-            if not res_p.data: return None
+            if not res_p.data: 
+                return None, "⚠️ No hay productos creados."
             df_p = pd.DataFrame(res_p.data)
             
-            # 2. Cruce de datos en Python
+            # 3. Cruce de datos
             df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
             df['Producto'] = df['nombre'].fillna('Desconocido')
             df['fecha'] = pd.to_datetime(df['fecha'])
             
-            # 3. Agrupación y Feature Engineering
+            # 4. Agrupación y Feature Engineering
             df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
             df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
@@ -220,14 +224,13 @@ elif st.session_state.pantalla == 'Dashboard':
                 'Mes': [fecha_hoy.month], 'Año': [fecha_hoy.year]
             })
 
-            # 4. Entrenamiento del Bosque Aleatorio
+            # 5. Entrenamiento IA
             predicciones = []
             for prod in df_diario['Producto'].unique():
                 if prod == 'Desconocido': continue
                 
                 datos_prod = df_diario[df_diario['Producto'] == prod]
-                # Bajamos la exigencia de 10 a 3 días de histórico para que siempre te muestre algo
-                if len(datos_prod) > 3: 
+                if len(datos_prod) > 3: # Exigimos al menos 4 días de historial
                     X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
                     y = datos_prod['cantidad_vendida']
                     
@@ -235,27 +238,41 @@ elif st.session_state.pantalla == 'Dashboard':
                     modelo.fit(X, y)
                     pred = modelo.predict(hoy_features)[0]
                     
-                    # Evitamos que la IA recomiende números negativos o muy locos
-                    pred_final = max(0, int(round(pred))) 
-                    
                     predicciones.append({
                         "Producto": prod,
-                        "Previsión IA (Uds)": pred_final,
+                        "Previsión IA (Uds)": max(0, int(round(pred))),
                         "Días Históricos": len(datos_prod)
                     })
             
-            # --- EL ESCUDO ANTIFALLOS ---
             df_resultados = pd.DataFrame(predicciones)
-            
-            # Si la IA no pudo predecir nada, devolvemos 'None' suavemente en lugar de romper la app
             if df_resultados.empty:
-                return None
+                return None, f"⚠️ Se leyeron {len(df_v)} ventas, pero ningún producto tiene más de 3 días de historial registrado."
                 
-            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False)
+            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ ¡Éxito! La IA se ha entrenado leyendo **{len(df_v)} registros** de ventas."
             
         except Exception as e:
-            st.error(f"Error entrenando IA: {e}")
-            return None
+            return None, f"❌ Error interno de la IA: {e}"
+
+    # --- EJECUTAR Y MOSTRAR RESULTADOS ---
+    df_prev, mensaje_diagnostico = entrenar_ia()
+    
+    # EL CHIVATO: Te muestra exactamente qué ha pasado
+    st.write(mensaje_diagnostico)
+    
+    if df_prev is not None and not df_prev.empty:
+        col_t, col_g = st.columns([1, 1.5])
+        with col_t:
+            st.subheader("🎯 Sugerencia para HOY")
+            st.dataframe(df_prev[['Producto', 'Previsión IA (Uds)']], hide_index=True, use_container_width=True)
+        with col_g:
+            st.subheader("Gráfico de Demanda")
+            fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
+            fig.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig, use_container_width=True)
+
+# ==========================================
+#        (AQUÍ EMPIEZA LA PANTALLA: CARGA)
+# ==========================================
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
