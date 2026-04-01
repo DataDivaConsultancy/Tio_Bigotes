@@ -10,7 +10,7 @@ import numpy as np
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
 
-# --- CONEXIÓN ROBUSTA ---
+# --- CONEXIÓN ROBUSTA A SUPABASE ---
 try:
     conn = st.connection(
         "supabase",
@@ -44,13 +44,13 @@ if st.session_state.pantalla == 'Home':
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🧠 DASHBOARD & IA PREDICTIVA"): ir_a('Dashboard')
+        if st.button("🧠 1. DASHBOARD & IA PREDICTIVA"): ir_a('Dashboard')
         if st.button("📦 GESTIÓN PRODUCTOS"): ir_a('Productos')
     with col2:
-        if st.button("📋 HOJA CONTROL DIARIO"): ir_a('Operativa')
+        if st.button("📋 2. HOJA CONTROL DIARIO"): ir_a('Operativa')
         if st.button("👥 GESTIÓN EMPLEADOS"): ir_a('Empleados')
     with col3:
-        if st.button("📥 CARGAR HISTORIAL CSV"): ir_a('Carga')
+        if st.button("📥 3. CARGAR HISTORIAL CSV"): ir_a('Carga')
 
 # ==========================================
 #        PANTALLA: GESTIÓN EMPLEADOS
@@ -69,7 +69,7 @@ elif st.session_state.pantalla == 'Empleados':
                     st.success(f"Empleado '{nom}' dado de alta exitosamente.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error al guardar empleado (¿Creaste la tabla en Supabase?): {e}")
+                    st.error(f"Error al guardar empleado: {e}")
 
     st.subheader("Personal Actual")
     try:
@@ -79,7 +79,7 @@ elif st.session_state.pantalla == 'Empleados':
         else:
             st.info("No hay empleados activos.")
     except Exception as e:
-        st.error("No se pudo cargar la lista de empleados. Asegúrate de crear la tabla 'empleados'.")
+        st.error(f"Error cargando empleados: {e}")
 
 # ==========================================
 #        PANTALLA: HOJA CONTROL DIARIO
@@ -99,25 +99,23 @@ elif st.session_state.pantalla == 'Operativa':
         emps = {}
         
     if not emps:
-        st.error("⚠️ Debes dar de alta empleados en la sección correspondiente primero.")
+        st.error("⚠️ Debes dar de alta empleados en la sección 'Gestión Empleados' primero.")
         st.stop()
     emp_sel = col_e.selectbox("Empleado responsable:", list(emps.keys()))
 
     st.divider()
 
-    # 2. CARGAR PRODUCTOS Y RESTO DE AYER
+    # 2. CARGAR PRODUCTOS Y RESTO DE AYER (CON ESCUDO ANTIFALLOS)
     res_p = conn.table("productos").select("id, nombre, categoria").execute()
     df_prod = pd.DataFrame(res_p.data)
 
     ayer = fecha_sel - datetime.timedelta(days=1)
-    
-    # ESCUDO ANTIFALLOS: Si la tabla control_diario no existe, no rompemos la app
     dict_ayer = {}
     try:
         res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
         dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
-    except Exception as e:
-        st.warning("⚠️ No se pudo cargar el stock de ayer (Posiblemente falte crear la tabla 'control_diario' en Supabase o el RLS está activo). Stock inicial a 0.")
+    except Exception:
+        pass # Si falla, dict_ayer queda vacío y todo el stock inicial arranca en 0
 
     # 3. PREPARAR TABLA PARA EDITAR
     data_hoja = []
@@ -150,7 +148,7 @@ elif st.session_state.pantalla == 'Operativa':
         hide_index=True, use_container_width=True, key="hoja_diaria"
     )
 
-    # 4. CALCULAR VENTAS
+    # 4. CALCULAR VENTAS EN TIEMPO REAL
     edited_df["Ventas"] = edited_df["Stock Inicial"] + edited_df["Horneados"] - edited_df["Merma"] - edited_df["Resto (Cierre)"]
 
     st.divider()
@@ -161,6 +159,7 @@ elif st.session_state.pantalla == 'Operativa':
             try:
                 lote = []
                 for _, row in edited_df.iterrows():
+                    # Guardamos solo si hay algún movimiento real
                     if any([row["Stock Inicial"] > 0, row["Horneados"] > 0, row["Merma"] > 0, row["Resto (Cierre)"] > 0]):
                         lote.append({
                             "fecha": str(fecha_sel),
@@ -180,7 +179,7 @@ elif st.session_state.pantalla == 'Operativa':
                 else:
                     st.info("No se han detectado movimientos para guardar.")
             except Exception as e:
-                st.error(f"Error al guardar: {e}. Revisa si la tabla 'control_diario' existe.")
+                st.error(f"Error al guardar: {e}. Revisa la estructura de 'control_diario' en Supabase.")
 
 # ==========================================
 #        PANTALLA: DASHBOARD & IA PREDICTIVA
@@ -194,13 +193,21 @@ elif st.session_state.pantalla == 'Dashboard':
     @st.cache_data(ttl=3600)
     def entrenar_ia():
         try:
-            res = conn.table("historial_ventas").select("fecha, cantidad_vendida, productos(nombre)").limit(50000).execute()
-            if not res.data: return None
+            # 1. Traemos ventas y productos por separado (Evita error PGRST200)
+            res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
+            if not res_v.data: return None
+            df_v = pd.DataFrame(res_v.data)
             
-            df = pd.DataFrame(res.data)
+            res_p = conn.table("productos").select("id, nombre").execute()
+            if not res_p.data: return None
+            df_p = pd.DataFrame(res_p.data)
+            
+            # 2. Cruce de datos en Python
+            df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
+            df['Producto'] = df['nombre'].fillna('Desconocido')
             df['fecha'] = pd.to_datetime(df['fecha'])
-            df['Producto'] = df['productos'].apply(lambda x: x['nombre'] if x else 'Desc.')
             
+            # 3. Agrupación y Feature Engineering
             df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
             df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
@@ -213,8 +220,11 @@ elif st.session_state.pantalla == 'Dashboard':
                 'Mes': [fecha_hoy.month], 'Año': [fecha_hoy.year]
             })
 
+            # 4. Entrenamiento del Bosque Aleatorio
             predicciones = []
             for prod in df_diario['Producto'].unique():
+                if prod == 'Desconocido': continue
+                
                 datos_prod = df_diario[df_diario['Producto'] == prod]
                 if len(datos_prod) > 10: 
                     X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
@@ -289,7 +299,7 @@ elif st.session_state.pantalla == 'Carga':
         nuevos = [n for n in nombres_csv if n and n not in dict_db]
 
         if nuevos:
-            st.warning(f"🔎 {len(nuevos)} productos nuevos detectados.")
+            st.warning(f"🔎 {len(nuevos)} productos nuevos detectados en el CSV.")
             seleccionados = st.multiselect("Crear estos productos:", nuevos, default=[])
             if seleccionados:
                 c_cat, c_pre = st.columns(2)
@@ -298,10 +308,10 @@ elif st.session_state.pantalla == 'Carga':
                 if st.button("✅ CREAR SELECCIONADOS"):
                     ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
                     conn.table("productos").insert(ins_list).execute()
-                    st.success("Productos creados.")
+                    st.success("Productos creados correctamente.")
                     st.rerun()
         else:
-            st.info("✅ Todos los productos existen.")
+            st.info("✅ Todos los productos del CSV ya existen en la base de datos.")
             if st.button("🚀 INICIAR SUBIDA MASIVA"):
                 progreso = st.progress(0)
                 lote, cont = [], 0
@@ -325,7 +335,8 @@ elif st.session_state.pantalla == 'Carga':
                             cont += len(lote)
                             lote = []
                         progreso.progress((i + 1) / len(df))
-                st.success(f"¡Proceso terminado! {cont} registros subidos.")
+                st.success(f"🎊 ¡Proceso terminado! {cont} registros subidos con éxito.")
+                st.balloons()
 
 # ==========================================
 #        PANTALLA: PRODUCTOS
@@ -333,6 +344,9 @@ elif st.session_state.pantalla == 'Carga':
 elif st.session_state.pantalla == 'Productos':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
     st.header("📦 Listado de Productos")
-    res = conn.table("productos").select("*").execute()
-    if res.data:
-        st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+    try:
+        res = conn.table("productos").select("*").execute()
+        if res.data:
+            st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+    except Exception as e:
+        st.error(f"Error cargando productos: {e}")
