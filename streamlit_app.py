@@ -196,7 +196,7 @@ elif st.session_state.pantalla == 'Dashboard':
             import holidays
             # Cargamos los festivos de España, provincia de Madrid para los últimos y próximos años
             años_historial = [2022, 2023, 2024, 2025, 2026, 2027]
-            festivos_madrid = holidays.Spain(years=años_historial, prov='MAD')
+            festivos_nacionales = holidays.Spain(years=años_historial)
 
             # 1. Traemos ventas y productos
             res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
