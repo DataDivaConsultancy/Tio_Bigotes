@@ -3,3 +3,4 @@ pandas
 st-supabase-connection
 plotly
 scikit-learn
+holidays
