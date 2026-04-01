@@ -8,11 +8,28 @@ import plotly.express as px
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
 
-# --- CONEXIÓN ---
-try:
-    conn = st.connection("supabase", type=SupabaseConnection)
-except:
-    st.error("Error de conexión. Revisa los Secrets.")
+# --- CONEXIÓN ROBUSTA ---
+def conectar():
+    try:
+        # Intento 1: Conexión estándar
+        return st.connection("supabase", type=SupabaseConnection)
+    except:
+        try:
+            # Intento 2: Conexión manual usando los secrets directamente
+            return st.connection(
+                "supabase_manual",
+                type=SupabaseConnection,
+                url=st.secrets["connections"]["supabase"]["url"],
+                key=st.secrets["connections"]["supabase"]["key"]
+            )
+        except Exception as e:
+            st.error(f"❌ No se pudo establecer la conexión: {e}")
+            return None
+
+conn = conectar()
+
+if conn is None:
+    st.info("💡 Consejo: Revisa que en Settings > Secrets el bloque empiece por [connections.supabase]")
     st.stop()
 
 # --- FUNCIONES AUXILIARES ---
@@ -29,6 +46,7 @@ def ir_a(p): st.session_state.pantalla = p
 # ==========================================
 if st.session_state.pantalla == 'Home':
     st.title("🥐 Tío Bigotes - Gestión Total")
+    st.write("Conexión establecida correctamente ✅")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📊 1. VER DASHBOARD"): ir_a('Dashboard')
@@ -106,8 +124,7 @@ elif st.session_state.pantalla == 'Carga':
                                 "total_neto": float(neto),
                                 "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
                             })
-                        except Exception as e:
-                            pass # Si una fila está mal, la saltamos
+                        except: pass
 
                         if len(lote) >= 1000 or i == total - 1:
                             if lote:
@@ -119,19 +136,17 @@ elif st.session_state.pantalla == 'Carga':
         except Exception as e:
             st.error(f"Error general en la carga: {e}")
 
-# ==========================================
-#        PANTALLAS: PRODUCTOS, OPERATIVA Y DASHBOARD
-# ==========================================
+# [Resto de pantallas: Productos, Operativa, Dashboard]
 elif st.session_state.pantalla == 'Productos':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📦 Listado de Productos")
+    st.header("📦 Productos")
     res = conn.table("productos").select("*").execute()
-    if res.data: st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+    if res.data: st.dataframe(pd.DataFrame(res.data))
 
 elif st.session_state.pantalla == 'Operativa':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("🔥 Registro Diario")
-    st.write("Pantalla para el control de stock diario.")
+    st.write("Pantalla operativa")
 
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.write("Dashboard")
