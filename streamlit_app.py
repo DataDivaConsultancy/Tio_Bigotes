@@ -186,15 +186,15 @@ elif st.session_state.pantalla == 'Operativa':
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva de Horneado (Con Calendario)")
+    st.title("🧠 IA Predictiva de Horneado (Nivel Nacional)")
     
-    st.info("💡 El modelo de Random Forest está analizando estacionalidad, tendencias y festivos de Madrid...")
+    st.info("💡 La IA está analizando estacionalidad, tendencias y el calendario de festivos nacionales de España...")
 
     @st.cache_data(ttl=3600, show_spinner="Entrenando IA y cruzando calendario de festivos... ⏳")
     def entrenar_ia():
         try:
             import holidays
-            # Cargamos los festivos de España, provincia de Madrid para los últimos y próximos años
+            # Cargamos los festivos NACIONALES de España
             años_historial = [2022, 2023, 2024, 2025, 2026, 2027]
             festivos_nacionales = holidays.Spain(years=años_historial)
 
@@ -210,78 +210,26 @@ elif st.session_state.pantalla == 'Dashboard':
             # 2. Cruce de datos
             df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
             df['Producto'] = df['nombre'].fillna('Desconocido')
-            df['fecha'] = pd.to_datetime(df['fecha']).dt.date # Nos aseguramos de que sea solo fecha (sin hora)
+            df['fecha'] = pd.to_datetime(df['fecha']).dt.date
             
             # 3. Agrupación por día
             df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
             df_diario['fecha'] = pd.to_datetime(df_diario['fecha'])
             
-            # 4. INGENIERÍA DE VARIABLES (FEATURE ENGINEERING) - AHORA CON FESTIVOS
+            # 4. INGENIERÍA DE VARIABLES (Con festivos de toda España)
             df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
             df_diario['Mes'] = df_diario['fecha'].dt.month
             df_diario['Año'] = df_diario['fecha'].dt.year
             
-            # MAGIA: Creamos columnas de Festivo y Víspera (1 si es cierto, 0 si no)
-            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_madrid else 0)
-            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_madrid else 0)
+            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_nacionales else 0)
+            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_nacionales else 0)
             
-            # Variables de HOY para hacer la predicción
+            # Variables de HOY 
             fecha_hoy = pd.to_datetime(datetime.date.today())
             hoy_features = pd.DataFrame({
                 'Dia_Semana': [fecha_hoy.dayofweek], 
-                'Dia_Mes': [fecha_hoy.day],
-                'Mes': [fecha_hoy.month], 
-                'Año': [fecha_hoy.year],
-                'Es_Festivo': [1 if fecha_hoy in festivos_madrid else 0],
-                'Es_Vispera': [1 if (fecha_hoy + pd.Timedelta(days=1)) in festivos_madrid else 0]
-            })
-
-            # 5. Entrenamiento del Bosque Aleatorio
-            predicciones = []
-            for prod in df_diario['Producto'].unique():
-                if prod == 'Desconocido': continue
-                
-                datos_prod = df_diario[df_diario['Producto'] == prod]
-                if len(datos_prod) > 3: 
-                    # Ahora la IA entrena con 6 variables, no solo 4
-                    X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año', 'Es_Festivo', 'Es_Vispera']]
-                    y = datos_prod['cantidad_vendida']
-                    
-                    modelo = RandomForestRegressor(n_estimators=100, random_state=42)
-                    modelo.fit(X, y)
-                    pred = modelo.predict(hoy_features)[0]
-                    
-                    predicciones.append({
-                        "Producto": prod,
-                        "Previsión IA (Uds)": max(0, int(round(pred))),
-                        "Días Históricos": len(datos_prod)
-                    })
-            
-            df_resultados = pd.DataFrame(predicciones)
-            if df_resultados.empty:
-                return None, "⚠️ Se leyeron ventas, pero ningún producto tiene más de 3 días de historial."
-                
-            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ IA entrenada con **{len(df_v)} registros**, cruzando datos con el calendario oficial de Madrid."
-            
-        except Exception as e:
-            return None, f"❌ Error interno de la IA: {e}"
-
-    # --- EJECUTAR Y MOSTRAR RESULTADOS ---
-    df_prev, mensaje = entrenar_ia()
-    
-    st.write(mensaje)
-    
-    if df_prev is not None and not df_prev.empty:
-        col_t, col_g = st.columns([1, 1.5])
-        with col_t:
-            st.subheader("🎯 Sugerencia para HOY")
-            st.dataframe(df_prev[['Producto', 'Previsión IA (Uds)']], hide_index=True, use_container_width=True)
-        with col_g:
-            st.subheader("Gráfico de Demanda")
-            fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
-            fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
+                'Dia_Mes': [fecha_
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
