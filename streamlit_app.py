@@ -226,7 +226,8 @@ elif st.session_state.pantalla == 'Dashboard':
                 if prod == 'Desconocido': continue
                 
                 datos_prod = df_diario[df_diario['Producto'] == prod]
-                if len(datos_prod) > 10: 
+                # Bajamos la exigencia de 10 a 3 días de histórico para que siempre te muestre algo
+                if len(datos_prod) > 3: 
                     X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
                     y = datos_prod['cantidad_vendida']
                     
@@ -234,31 +235,27 @@ elif st.session_state.pantalla == 'Dashboard':
                     modelo.fit(X, y)
                     pred = modelo.predict(hoy_features)[0]
                     
+                    # Evitamos que la IA recomiende números negativos o muy locos
+                    pred_final = max(0, int(round(pred))) 
+                    
                     predicciones.append({
                         "Producto": prod,
-                        "Previsión IA (Uds)": int(round(pred)),
+                        "Previsión IA (Uds)": pred_final,
                         "Días Históricos": len(datos_prod)
                     })
             
-            return pd.DataFrame(predicciones).sort_values(by="Previsión IA (Uds)", ascending=False)
+            # --- EL ESCUDO ANTIFALLOS ---
+            df_resultados = pd.DataFrame(predicciones)
+            
+            # Si la IA no pudo predecir nada, devolvemos 'None' suavemente en lugar de romper la app
+            if df_resultados.empty:
+                return None
+                
+            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False)
+            
         except Exception as e:
             st.error(f"Error entrenando IA: {e}")
             return None
-
-    df_prev = entrenar_ia()
-    
-    if df_prev is not None and not df_prev.empty:
-        col_t, col_g = st.columns([1, 1.5])
-        with col_t:
-            st.subheader("🎯 Sugerencia para HOY")
-            st.dataframe(df_prev[['Producto', 'Previsión IA (Uds)']], hide_index=True, use_container_width=True)
-        with col_g:
-            st.subheader("Gráfico de Demanda")
-            fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
-            fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No hay suficientes datos en el historial para generar predicciones.")
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
