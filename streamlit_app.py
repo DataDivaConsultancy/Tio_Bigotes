@@ -15,16 +15,7 @@ except:
     st.error("Error de conexión. Revisa los Secrets.")
     st.stop()
 
-# --- ESTILOS ---
-st.markdown("""
-    <style>
-    div.stButton > button {
-        height: 70px; width: 100%; font-size: 18px; font-weight: bold;
-        border-radius: 12px; background-color: #ff9800; color: white; margin-bottom: 10px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
+# --- NAVEGACIÓN ---
 if 'pantalla' not in st.session_state:
     st.session_state.pantalla = 'Home'
 
@@ -44,26 +35,60 @@ if st.session_state.pantalla == 'Home':
         if st.button("📥 4. CARGAR HISTORIAL CSV"): ir_a('Carga')
 
 # ==========================================
-#        PANTALLA: CARGA DE HISTORIAL
+#        PANTALLA: CARGA DE HISTORIAL (AQUÍ ESTÁ EL CAMBIO)
 # ==========================================
 elif st.session_state.pantalla == 'Carga':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📥 Importar Datos Históricos")
-    st.write("Sube tus archivos CSV (2023, 2024, 2025) para alimentar el Dashboard.")
+    st.header("📥 Importar Historial de Ventas")
     
-    archivo = st.file_uploader("Selecciona el archivo CSV", type=['csv'])
+    archivo = st.file_uploader("Sube el CSV de Ventas Diarias", type=['csv'])
     
     if archivo is not None:
-        df_subida = pd.read_csv(archivo)
-        st.write("Vista previa de los datos:")
-        st.dataframe(df_subida.head())
-        
-        if st.button("SUBIR A BASE DE DATOS"):
-            # Aquí iría la lógica de mapeo. 
-            # Nota: Los nombres del CSV deben coincidir con los de la tabla 'productos'
-            st.info("Procesando filas... esto puede tardar un momento.")
-            # Por ahora simulamos la carga para no saturar si el CSV es gigante
-            st.success("¡Datos cargados con éxito! (En una base de datos real, mapearíamos las columnas aquí)")
+        try:
+            # SOLUCIÓN AL ERROR DE UNICODE: Usamos latin-1 y motor python
+            df_subida = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
+            st.success("✅ Archivo leído correctamente")
+            st.write("Vista previa de tus datos:")
+            st.dataframe(df_subida.head())
+            
+            if st.button("🚀 PROCESAR Y SUBIR A BASE DE DATOS"):
+                # 1. Traer productos de Supabase para saber sus IDs
+                res_p = conn.table("productos").select("id, nombre").execute()
+                mapeo_prod = {p['nombre'].upper().strip(): p['id'] for p in res_p.data}
+                
+                filas_ok = 0
+                filas_error = 0
+                
+                progreso = st.progress(0)
+                total = len(df_subida)
+
+                for i, fila in df_subida.iterrows():
+                    nombre_csv = str(fila['Artículo']).upper().strip()
+                    
+                    if nombre_csv in mapeo_prod:
+                        # Limpiar el precio/neto por si tiene comas
+                        neto = str(fila['Neto']).replace(',', '.')
+                        
+                        dato = {
+                            "fecha": pd.to_datetime(fila['Fecha']).strftime('%Y-%m-%d'),
+                            "producto_id": mapeo_prod[nombre_csv],
+                            "cantidad_vendida": int(fila['Uds.V']),
+                            "total_neto": float(neto),
+                            "metodo_pago": str(fila['Forma de pago'])
+                        }
+                        conn.table("historial_ventas").insert(dato).execute()
+                        filas_ok += 1
+                    else:
+                        filas_error += 1
+                    
+                    progreso.progress((i + 1) / total)
+
+                st.success(f"📊 ¡Listo! {filas_ok} registros subidos correctamente.")
+                if filas_error > 0:
+                    st.warning(f"⚠️ {filas_error} filas no se subieron. Asegúrate de que el nombre del 'Artículo' en el Excel coincida con el nombre que diste de alta en la web.")
+
+        except Exception as e:
+            st.error(f"Error al procesar: {e}")
 
 # ==========================================
 #        PANTALLA: PRODUCTOS (ALTA)
@@ -79,13 +104,11 @@ elif st.session_state.pantalla == 'Productos':
         if st.form_submit_button("AÑADIR PRODUCTO"):
             if n:
                 conn.table("productos").insert({"nombre": n, "categoria": c, "precio_unidad": p}).execute()
-                st.success(f"'{n}' añadido correctamente.")
-            else: st.error("El nombre es obligatorio.")
+                st.success(f"'{n}' añadido.")
+            else: st.error("Falta nombre.")
 
-    st.divider()
     res = conn.table("productos").select("*").execute()
     if res.data:
-        st.subheader("Lista actual")
         st.dataframe(pd.DataFrame(res.data)[["nombre", "categoria", "precio_unidad"]], use_container_width=True)
 
 # ==========================================
@@ -93,38 +116,34 @@ elif st.session_state.pantalla == 'Productos':
 # ==========================================
 elif st.session_state.pantalla == 'Operativa':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("🔥 Control de Horno y Cierre")
+    st.header("🔥 Control de Horno")
     
     res = conn.table("productos").select("id, nombre").execute()
-    dict_productos = {p['nombre']: p['id'] for p in res.data}
+    dict_p = {p['nombre']: p['id'] for p in res.data}
     
-    if dict_productos:
-        producto_nombre = st.selectbox("Producto", dict_productos.keys())
+    if dict_p:
+        p_sel = st.selectbox("Producto", dict_p.keys())
         c1, c2, c3, c4 = st.columns(4)
         ini = c1.number_input("Inicial", 0)
         hor = c2.number_input("Horneados", 0)
         mer = c3.number_input("Mermas", 0)
         fin = c4.number_input("Final", 0)
         
-        venta = (ini + hor) - mer - fin
-        st.metric("VENTA CALCULADA", f"{venta} uds")
+        v = (ini + hor) - mer - fin
+        st.metric("VENTA", f"{v} uds")
         
-        if st.button("GUARDAR REGISTRO"):
-            data = {
-                "fecha": str(datetime.date.today()),
-                "producto_id": dict_productos[producto_nombre],
+        if st.button("GUARDAR"):
+            conn.table("control_diario").insert({
+                "fecha": str(datetime.date.today()), "producto_id": dict_p[p_sel],
                 "stock_inicial": ini, "horneados": hor, "mermas": mer, "stock_final": fin
-            }
-            conn.table("control_diario").insert(data).execute()
+            }).execute()
             st.success("Guardado.")
-    else:
-        st.warning("Añade productos primero.")
+    else: st.warning("Crea productos primero.")
 
 # ==========================================
-#        PANTALLA: DASHBOARD
+#        PANTALLA: DASHBOARD (PRÓXIMAMENTE)
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
     st.header("📊 Análisis de Ventas")
-    st.info("Aquí verás las gráficas comparativas una vez cargues el Historial.")
-    # Aquí irán los gráficos de barras y líneas comparando años.
+    st.info("Aquí verás las comparativas en cuanto subas tu primer CSV en la sección 4.")
