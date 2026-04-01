@@ -88,58 +88,105 @@ elif st.session_state.pantalla == 'BI':
             st.info("Cruce de inventario disponible si se ha rellenado la hoja de control.")
 
 # ==========================================
-#        PANTALLA: CARGA CSV (CORREGIDA)
+#        PANTALLA: CARGA DE DATOS (MAPEO PRO)
 # ==========================================
 elif st.session_state.pantalla == 'Carga':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📥 Importador de Historial (2023-2026)")
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
+    st.header("📥 Importador y Mapeo de Historial")
     
-    file = st.file_uploader("Sube tu CSV", type=['csv'])
-    if file:
-        df = pd.read_csv(file, encoding='latin-1', sep=None, engine='python')
-        cols = list(df.columns)
+    archivo = st.file_uploader("Sube tu archivo CSV (2023-2026)", type=['csv'])
+    if archivo:
+        # Leemos el CSV
+        df_csv = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
+        cabeceras = list(df_csv.columns)
         
-        st.subheader("Mapea las columnas correctamente:")
-        c1, c2, c3 = st.columns(3)
-        f_col = c1.selectbox("Fecha", cols)
-        p_col = c2.selectbox("Producto (Artículo)", cols)
-        u_col = c3.selectbox("Unidades (Uds.V)", cols)
+        # 1. Recuperar el mapeo guardado anteriormente (si existe)
+        try:
+            res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
+            m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
+        except:
+            m_prev = {}
         
-        c4, c5, c6 = st.columns(3)
-        n_col = c4.selectbox("Total Neto", cols)
-        m_col = c5.selectbox("Método de Pago", cols)
-        t_col = c6.selectbox("Ticket (Serie / Número)", cols) # ESTA ES LA COLUMNA CLAVE
+        st.subheader("⚙️ Configurar Columnas")
+        # Campos necesarios en la base de datos
+        campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago", "ticket_id"]
+        nuevo_mapeo = {}
         
-        if st.button("🚀 INICIAR SUBIDA MASIVA"):
-            res_p = conn.table("productos").select("id, nombre").execute()
-            dict_prods = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
+        cols_grid = st.columns(3)
+        for i, c_db in enumerate(campos_db):
+            # Intentamos pre-seleccionar lo que el usuario eligió la última vez
+            idx_prev = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
+            with cols_grid[i % 3]:
+                nuevo_mapeo[c_db] = st.selectbox(f"Columna para: {c_db}", cabeceras, index=idx_prev, key=f"sel_{c_db}")
             
-            df[f_col] = pd.to_datetime(df[f_col], dayfirst=True, errors='coerce')
+        if st.button("💾 GUARDAR ESTE MAPEO COMO PREDETERMINADO"):
+            conn.table("config_mapeo").upsert({"id": "historial", "mapeo": nuevo_mapeo}).execute()
+            st.success("✅ Mapeo guardado. No tendrás que elegir las columnas la próxima vez.")
+
+        st.divider()
+
+        # 2. Detector de Productos Nuevos
+        # Limpiamos los nombres del CSV y comparamos con los de la base de datos
+        nombres_en_csv = df_csv[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
+        res_p = conn.table("productos").select("id, nombre").execute()
+        dict_db_productos = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
+        
+        productos_nuevos = [n for n in nombres_en_csv if n and n not in dict_db_productos]
+
+        if productos_nuevos:
+            st.warning(f"🔎 Se han detectado {len(productos_nuevos)} productos en el CSV que NO existen en tu catálogo.")
+            seleccionados = st.multiselect("Selecciona los productos que quieres crear ahora mismo:", productos_nuevos)
+            
+            if seleccionados:
+                c_cat, c_pre = st.columns(2)
+                cat_m = c_cat.selectbox("Categoría para estos productos:", ["Empanada", "Bebida", "Alfajor", "Otro"])
+                pre_m = c_pre.number_input("Precio base estimado (€):", value=0.0)
+                
+                if st.button("✅ CREAR PRODUCTOS SELECCIONADOS"):
+                    ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
+                    conn.table("productos").insert(ins_list).execute()
+                    st.success(f"🎊 {len(seleccionados)} productos añadidos. Ya puedes subir el historial.")
+                    st.rerun()
+        else:
+            st.info("✅ Todos los productos del CSV ya están registrados en el sistema.")
+
+        # 3. Botón de Subida Masiva
+        if st.button("🚀 INICIAR SUBIDA MASIVA AL HISTORIAL"):
+            progreso = st.progress(0)
             lote, cont = [], 0
             
-            for _, fila in df.iterrows():
-                nom = limpiar_nombre(fila[p_col])
-                if nom in dict_prods and pd.notnull(fila[f_col]):
-                    try:
-                        lote.append({
-                            "fecha": fila[f_col].strftime('%Y-%m-%d'),
-                            "producto_id": dict_prods[nom],
-                            "cantidad_vendida": int(fila[u_col]),
-                            "total_neto": float(str(fila[n_col]).replace(',', '.')),
-                            "metodo_pago": str(fila[m_col]),
-                            "ticket_id": str(fila[t_col]) # Guardamos el ticket en su sitio
-                        })
-                    except: pass
+            # Aseguramos formato de fecha europeo
+            df_csv[nuevo_mapeo['fecha']] = pd.to_datetime(df_csv[nuevo_mapeo['fecha']], dayfirst=True, errors='coerce')
+            
+            for i, fila in df_csv.iterrows():
+                nom_limpio = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
                 
-                if len(lote) >= 1000:
-                    conn.table("historial_ventas").insert(lote).execute()
-                    cont += len(lote)
-                    lote = []
+                # Solo subimos si el producto existe y la fecha es válida
+                if nom_limpio in dict_db_productos and pd.notnull(fila[nuevo_mapeo['fecha']]):
+                    try:
+                        # Limpieza de decimales por si vienen con coma
+                        precio_neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
+                        
+                        lote.append({
+                            "fecha": fila[nuevo_mapeo['fecha']].strftime('%Y-%m-%d'),
+                            "producto_id": dict_db_productos[nom_limpio],
+                            "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
+                            "total_neto": float(precio_neto),
+                            "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']]),
+                            "ticket_id": str(fila[nuevo_mapeo['ticket_id']]) # El famoso Ticket ID
+                        })
+                    except:
+                        pass
+                
+                # Subimos en bloques de 1000 para no saturar la conexión
+                if len(lote) >= 1000 or i == len(df_csv) - 1:
+                    if lote:
+                        conn.table("historial_ventas").insert(lote).execute()
+                        cont += len(lote)
+                        lote = []
+                    progreso.progress((i + 1) / len(df_csv))
             
-            if lote:
-                conn.table("historial_ventas").insert(lote).execute()
-                cont += len(lote)
-            
-            st.success(f"🎊 ¡{cont} registros subidos! Ahora puedes ir al BI.")
+            st.success(f"🎊 Proceso terminado. Se han cargado {cont} registros en 'historial_ventas'.")
+            st.balloons()
 
 # (Aquí siguen las pantallas de Operativa, Productos, Empleados y Dashboard IA que ya tenías)
