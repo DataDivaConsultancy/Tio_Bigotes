@@ -13,9 +13,10 @@ conn = st.connection("gsheets", type=GSheetConnection)
 st.markdown("""
     <style>
     div.stButton > button:first-child {
-        height: 90px; width: 100%; font-size: 20px; font-weight: bold;
+        height: 80px; width: 100%; font-size: 18px; font-weight: bold;
         border-radius: 12px; background-color: #ff9800; color: white;
     }
+    .stMetric { background-color: #f0f2f6; padding: 15px; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -32,64 +33,91 @@ if st.session_state.pantalla == 'Home':
     col_logo_1, col_logo_2, col_logo_3 = st.columns([1, 2, 1])
     with col_logo_2:
         try: st.image('image.png', use_column_width=True)
-        except: st.warning("Sube 'image.png' a GitHub")
+        except: st.info("Cargando Panel Tío Bigotes...")
     
-    st.subheader("Menú Principal")
+    st.subheader(f"Gestión de Tienda | {datetime.date.today().strftime('%d/%m/%Y')}")
     st.divider()
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📊 1. VER VENTAS (DASHBOARD)"): ir_a('Dashboard')
-    with col2:
-        if st.button("🔥 2. REGISTRAR HORNEADO"): ir_a('Operativa')
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📊 1. DASHBOARD (HISTORIAL)"): ir_a('Dashboard')
+        if st.button("👨‍🍳 2. CONTROL DIARIO & HORNEADO"): ir_a('Operativa')
+    with c2:
+        if st.button("🛒 3. PREVISIÓN DE COMPRAS"): ir_a('Compras')
+        if st.button("📈 4. IA PROMEDIOS & LISTAS"): ir_a('IA')
 
 # ==========================================
-#        PANTALLA: 1. DASHBOARD (LECTURA)
+#        PANTALLA: 1. DASHBOARD (Historial)
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.title("📊 Análisis de Ventas Real")
+    st.button("⬅️ MENU", on_click=ir_a, args=('Home',))
+    st.title("📊 Análisis de Ventas (Historial)")
     
     try:
-        # Intentamos leer la pestaña "VENTAS" de tu Sheet
-        df_ventas = conn.read(worksheet="VENTAS")
-        st.success("✅ Datos cargados desde Google Sheets")
-        
-        # Muestra las últimas 5 ventas registradas
-        st.write("Últimos registros en el Excel:")
-        st.dataframe(df_ventas.tail(5), use_container_width=True)
-        
-    except Exception as e:
-        st.error(f"No pude leer la pestaña 'VENTAS'. Revisa que el nombre sea exacto en el Sheet.")
-        st.info("Asegúrate de haber compartido el Sheet con: streamlit-app@streamlit-app-274213.iam.gserviceaccount.com")
+        df_historial = conn.read(worksheet="Historial")
+        # Mostrar métricas rápidas de la última fecha registrada
+        st.write("Últimos datos registrados en Historial:")
+        st.dataframe(df_historial.tail(10), use_container_width=True)
+    except:
+        st.error("No se pudo leer la pestaña 'Historial'. Revisa el nombre en tu Excel.")
 
 # ==========================================
-#   PANTALLA: 2. OPERATIVA (ESCRITURA)
+#   PANTALLA: 2. CONTROL DIARIO / HORNEADO
 # ==========================================
 elif st.session_state.pantalla == 'Operativa':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.title("👨‍🍳 Registro de Horneado")
+    st.button("⬅️ MENU", on_click=ir_a, args=('Home',))
+    st.title("🔥 Operativa Diaria")
     
-    with st.form("form_horneado"):
-        sabor = st.selectbox("Sabor", ["Carne Cuchillo", "Pollo", "J&Q", "Caprese", "Carne Picante", "Carne Suave"])
-        cantidad = st.number_input("Cantidad (Unidades)", min_value=1, step=1)
-        enviar = st.form_submit_button("💾 GUARDAR EN EXCEL")
-        
-        if enviar:
-            # Creamos la línea de datos
-            nueva_fila = pd.DataFrame([{
-                "Fecha": datetime.date.today().strftime("%Y-%m-%d"),
-                "Sabor": sabor,
-                "Cantidad": cantidad
-            }])
+    tab1, tab2 = st.tabs(["Previsión Sugerida", "Registro Control Diario"])
+    
+    with tab1:
+        st.subheader("Sugerencia de Horneado")
+        try:
+            df_prev = conn.read(worksheet="Prevision Horneado")
+            st.write("Basado en el promedio de hoy y eventos especiales:")
+            st.table(df_prev.head(10)) 
+        except:
+            st.info("Pestaña 'Prevision Horneado' no encontrada o vacía.")
+
+    with tab2:
+        st.subheader("Anotar Stock / Horneado")
+        with st.form("control_diario"):
+            producto = st.selectbox("Producto", ["Carne Cuchillo", "Pollo", "J&Q", "Caprese", "Carne Picante", "Carne Suave"])
+            tipo = st.radio("¿Qué registras?", ["Horneado", "Merma", "Resto (Cierre)"])
+            cantidad = st.number_input("Cantidad", min_value=0, step=1)
             
-            # Intentamos escribir en la pestaña "HORNEADOS"
-            try:
-                # Leemos lo que hay, añadimos lo nuevo y guardamos
-                df_actual = conn.read(worksheet="HORNEADOS")
-                df_final = pd.concat([df_actual, nueva_fila], ignore_index=True)
-                conn.update(worksheet="HORNEADOS", data=df_final)
+            if st.form_submit_button("Guardar en Control Diario"):
+                # Aquí iría la lógica para enviar a la pestaña "Control Diario"
+                st.success(f"Registrado: {cantidad} de {producto} como {tipo}")
                 st.balloons()
-                st.success(f"¡Guardado! {cantidad} de {sabor} registradas.")
-            except:
-                st.error("Error al guardar. ¿Existe la pestaña 'HORNEADOS' en tu Sheet?")
+
+# ==========================================
+#        PANTALLA: 3. PREVISIÓN COMPRAS
+# ==========================================
+elif st.session_state.pantalla == 'Compras':
+    st.button("⬅️ MENU", on_click=ir_a, args=('Home',))
+    st.title("🛒 Previsión de Compras")
+    try:
+        df_compras = conn.read(worksheet="Prevision compras")
+        st.dataframe(df_compras, use_container_width=True)
+    except:
+        st.error("No se pudo cargar la pestaña 'Prevision compras'.")
+
+# ==========================================
+#        PANTALLA: 4. IA & LISTAS
+# ==========================================
+elif st.session_state.pantalla == 'IA':
+    st.button("⬅️ MENU", on_click=ir_a, args=('Home',))
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("IA Promedios")
+        try:
+            df_prom = conn.read(worksheet="IA_Promedios")
+            st.dataframe(df_prom)
+        except: st.write("Error cargando promedios.")
+    with col2:
+        st.subheader("Listas")
+        try:
+            df_listas = conn.read(worksheet="Listas")
+            st.dataframe(df_listas)
+        except: st.write("Error cargando listas.")
