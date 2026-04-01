@@ -105,7 +105,7 @@ elif st.session_state.pantalla == 'Operativa':
 
     st.divider()
 
-    # 2. CARGAR PRODUCTOS Y RESTO DE AYER (CON ESCUDO ANTIFALLOS)
+    # 2. CARGAR PRODUCTOS Y RESTO DE AYER
     res_p = conn.table("productos").select("id, nombre, categoria").execute()
     df_prod = pd.DataFrame(res_p.data)
 
@@ -115,7 +115,7 @@ elif st.session_state.pantalla == 'Operativa':
         res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
         dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
     except Exception:
-        pass # Si falla, dict_ayer queda vacío y todo el stock inicial arranca en 0
+        pass 
 
     # 3. PREPARAR TABLA PARA EDITAR
     data_hoja = []
@@ -142,187 +142,4 @@ elif st.session_state.pantalla == 'Operativa':
             "Stock Inicial": st.column_config.NumberColumn("Stock Inicial", min_value=0),
             "Horneados": st.column_config.NumberColumn("Horneados", min_value=0),
             "Merma": st.column_config.NumberColumn("Merma (Tirado)", min_value=0),
-            "Resto (Cierre)": st.column_config.NumberColumn("Resto (Cierre)", min_value=0),
-            "Ventas": st.column_config.NumberColumn("Ventas (Auto)", disabled=True)
-        },
-        hide_index=True, use_container_width=True, key="hoja_diaria"
-    )
-
-    # 4. CALCULAR VENTAS EN TIEMPO REAL
-    edited_df["Ventas"] = edited_df["Stock Inicial"] + edited_df["Horneados"] - edited_df["Merma"] - edited_df["Resto (Cierre)"]
-
-    st.divider()
-
-    # 5. GUARDAR DATOS
-    if st.button("💾 GRABAR TODOS LOS DATOS Y LIMPIAR"):
-        with st.spinner("Guardando registro en la base de datos..."):
-            try:
-                lote = []
-                for _, row in edited_df.iterrows():
-                    # Guardamos solo si hay algún movimiento real
-                    if any([row["Stock Inicial"] > 0, row["Horneados"] > 0, row["Merma"] > 0, row["Resto (Cierre)"] > 0]):
-                        lote.append({
-                            "fecha": str(fecha_sel),
-                            "producto_id": int(row["ID"]),
-                            "empleado_id": emps[emp_sel],
-                            "stock_inicial": int(row["Stock Inicial"]),
-                            "horneados": int(row["Horneados"]),
-                            "merma": int(row["Merma"]),
-                            "resto": int(row["Resto (Cierre)"]),
-                            "desviacion_inicial": int(row["Stock Inicial"] - dict_ayer.get(row["ID"], 0))
-                        })
-                
-                if lote:
-                    conn.table("control_diario").insert(lote).execute()
-                    st.success(f"✅ ¡Guardado con éxito! {len(lote)} productos procesados.")
-                    st.balloons()
-                else:
-                    st.info("No se han detectado movimientos para guardar.")
-            except Exception as e:
-                st.error(f"Error al guardar: {e}. Revisa la estructura de 'control_diario' en Supabase.")
-
-# ==========================================
-#        PANTALLA: DASHBOARD & IA PREDICTIVA
-# ==========================================
-elif st.session_state.pantalla == 'Dashboard':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva de Horneado (Nivel Nacional)")
-    
-    st.info("💡 La IA está analizando estacionalidad, tendencias y el calendario de festivos nacionales de España...")
-
-    @st.cache_data(ttl=3600, show_spinner="Entrenando IA y cruzando calendario de festivos... ⏳")
-    def entrenar_ia():
-        try:
-            import holidays
-            # Cargamos los festivos NACIONALES de España
-            años_historial = [2022, 2023, 2024, 2025, 2026, 2027]
-            festivos_nacionales = holidays.Spain(years=años_historial)
-
-            # 1. Traemos ventas y productos
-            res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
-            if not res_v.data: return None, "⚠️ La tabla de historial está vacía."
-            df_v = pd.DataFrame(res_v.data)
-            
-            res_p = conn.table("productos").select("id, nombre").execute()
-            if not res_p.data: return None, "⚠️ No hay productos."
-            df_p = pd.DataFrame(res_p.data)
-            
-            # 2. Cruce de datos
-            df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
-            df['Producto'] = df['nombre'].fillna('Desconocido')
-            df['fecha'] = pd.to_datetime(df['fecha']).dt.date
-            
-            # 3. Agrupación por día
-            df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
-            df_diario['fecha'] = pd.to_datetime(df_diario['fecha'])
-            
-            # 4. INGENIERÍA DE VARIABLES (Con festivos de toda España)
-            df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
-            df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
-            df_diario['Mes'] = df_diario['fecha'].dt.month
-            df_diario['Año'] = df_diario['fecha'].dt.year
-            
-            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_nacionales else 0)
-            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_nacionales else 0)
-            
-           # Variables de HOY 
-            fecha_hoy = pd.to_datetime(datetime.date.today())
-            hoy_features = pd.DataFrame({
-                'Dia_Semana': [fecha_hoy.dayofweek], 
-                'Dia_Mes': [fecha_hoy.day],
-                'Mes': [fecha_hoy.month], 
-                'Año': [fecha_hoy.year],
-                'Es_Festivo': [1 if fecha_hoy in festivos_nacionales else 0],
-                'Es_Vispera': [1 if (fecha_hoy + pd.Timedelta(days=1)) in festivos_nacionales else 0]
-            })
-
-# ==========================================
-#        PANTALLA: CARGA DE DATOS (MAPEO)
-# ==========================================
-elif st.session_state.pantalla == 'Carga':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.header("📥 Importador y Mapeo de CSV")
-    
-    archivo = st.file_uploader("Sube tu archivo CSV", type=['csv'])
-    if archivo:
-        df = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
-        cabeceras = list(df.columns)
-        
-        try:
-            res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
-            m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
-        except:
-            m_prev = {}
-        
-        st.subheader("⚙️ Configurar Columnas")
-        campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago"]
-        nuevo_mapeo = {}
-        cols = st.columns(len(campos_db))
-        
-        for i, c_db in enumerate(campos_db):
-            idx = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
-            nuevo_mapeo[c_db] = cols[i].selectbox(c_db, cabeceras, index=idx)
-            
-        if st.button("💾 GUARDAR MAPEO"):
-            conn.table("config_mapeo").upsert({"id": "historial", "mapeo": nuevo_mapeo}).execute()
-            st.success("Mapeo guardado")
-
-        st.divider()
-
-        nombres_csv = df[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
-        res_p = conn.table("productos").select("id, nombre").execute()
-        dict_db = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
-        nuevos = [n for n in nombres_csv if n and n not in dict_db]
-
-        if nuevos:
-            st.warning(f"🔎 {len(nuevos)} productos nuevos detectados en el CSV.")
-            seleccionados = st.multiselect("Crear estos productos:", nuevos, default=[])
-            if seleccionados:
-                c_cat, c_pre = st.columns(2)
-                cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
-                pre_m = c_pre.number_input("Precio base (€):", value=0.0)
-                if st.button("✅ CREAR SELECCIONADOS"):
-                    ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
-                    conn.table("productos").insert(ins_list).execute()
-                    st.success("Productos creados correctamente.")
-                    st.rerun()
-        else:
-            st.info("✅ Todos los productos del CSV ya existen en la base de datos.")
-            if st.button("🚀 INICIAR SUBIDA MASIVA"):
-                progreso = st.progress(0)
-                lote, cont = [], 0
-                for i, fila in df.iterrows():
-                    nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
-                    if nom in dict_db:
-                        try:
-                            neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
-                            lote.append({
-                                "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
-                                "producto_id": dict_db[nom],
-                                "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
-                                "total_neto": float(neto),
-                                "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
-                            })
-                        except: pass
-                    
-                    if len(lote) >= 1000 or i == len(df) - 1:
-                        if lote:
-                            conn.table("historial_ventas").insert(lote).execute()
-                            cont += len(lote)
-                            lote = []
-                        progreso.progress((i + 1) / len(df))
-                st.success(f"🎊 ¡Proceso terminado! {cont} registros subidos con éxito.")
-                st.balloons()
-
-# ==========================================
-#        PANTALLA: PRODUCTOS
-# ==========================================
-elif st.session_state.pantalla == 'Productos':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.header("📦 Listado de Productos")
-    try:
-        res = conn.table("productos").select("*").execute()
-        if res.data:
-            st.dataframe(pd.DataFrame(res.data), use_container_width=True)
-    except Exception as e:
-        st.error(f"Error cargando productos: {e}")
+            "Resto (
