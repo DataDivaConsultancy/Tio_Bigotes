@@ -92,4 +92,239 @@ elif st.session_state.pantalla == 'Operativa':
     res_emp = conn.table("empleados").select("id, nombre").eq("activo", True).execute()
     emps = {e['nombre']: e['id'] for e in res_emp.data} if res_emp.data else {}
     
-    if not
+    if not emps:
+        st.error("⚠️ Debes dar de alta empleados en la sección correspondiente primero.")
+        st.stop()
+    emp_sel = col_e.selectbox("Empleado responsable:", list(emps.keys()))
+
+    st.divider()
+
+    # 2. CARGAR PRODUCTOS Y RESTO DE AYER
+    res_p = conn.table("productos").select("id, nombre, categoria").execute()
+    df_prod = pd.DataFrame(res_p.data)
+
+    ayer = fecha_sel - datetime.timedelta(days=1)
+    res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
+    dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
+
+    # 3. PREPARAR TABLA PARA EDITAR
+    data_hoja = []
+    for _, row in df_prod.iterrows():
+        st_ayer = dict_ayer.get(row['id'], 0)
+        data_hoja.append({
+            "ID": row['id'],
+            "Producto": row['nombre'],
+            "Stock Inicial": st_ayer,
+            "Horneados": 0,
+            "Merma": 0,
+            "Resto (Cierre)": 0,
+            "Ventas": 0
+        })
+
+    df_base = pd.DataFrame(data_hoja)
+
+    st.subheader("📝 Introduce los movimientos del día")
+    edited_df = st.data_editor(
+        df_base,
+        column_config={
+            "ID": None,
+            "Producto": st.column_config.TextColumn("Producto", disabled=True),
+            "Stock Inicial": st.column_config.NumberColumn("Stock Inicial", min_value=0),
+            "Horneados": st.column_config.NumberColumn("Horneados", min_value=0),
+            "Merma": st.column_config.NumberColumn("Merma (Tirado)", min_value=0),
+            "Resto (Cierre)": st.column_config.NumberColumn("Resto (Cierre)", min_value=0),
+            "Ventas": st.column_config.NumberColumn("Ventas (Auto)", disabled=True)
+        },
+        hide_index=True, use_container_width=True, key="hoja_diaria"
+    )
+
+    # 4. CALCULAR VENTAS
+    edited_df["Ventas"] = edited_df["Stock Inicial"] + edited_df["Horneados"] - edited_df["Merma"] - edited_df["Resto (Cierre)"]
+
+    st.divider()
+
+    # 5. GUARDAR DATOS
+    if st.button("💾 GRABAR TODOS LOS DATOS Y LIMPIAR"):
+        with st.spinner("Guardando registro en la base de datos..."):
+            try:
+                lote = []
+                for _, row in edited_df.iterrows():
+                    # Guardamos si hay algún tipo de movimiento
+                    if any([row["Stock Inicial"] > 0, row["Horneados"] > 0, row["Merma"] > 0, row["Resto (Cierre)"] > 0]):
+                        lote.append({
+                            "fecha": str(fecha_sel),
+                            "producto_id": int(row["ID"]),
+                            "empleado_id": emps[emp_sel],
+                            "stock_inicial": int(row["Stock Inicial"]),
+                            "horneados": int(row["Horneados"]),
+                            "merma": int(row["Merma"]),
+                            "resto": int(row["Resto (Cierre)"]),
+                            "desviacion_inicial": int(row["Stock Inicial"] - dict_ayer.get(row["ID"], 0))
+                        })
+                
+                if lote:
+                    conn.table("control_diario").insert(lote).execute()
+                    st.success(f"✅ ¡Guardado con éxito! {len(lote)} productos procesados.")
+                    st.balloons()
+                else:
+                    st.info("No se han detectado movimientos para guardar.")
+            except Exception as e:
+                st.error(f"Error al guardar: {e}")
+
+# ==========================================
+#        PANTALLA: DASHBOARD & IA PREDICTIVA
+# ==========================================
+elif st.session_state.pantalla == 'Dashboard':
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
+    st.title("🧠 IA Predictiva de Horneado")
+    
+    st.info("💡 El modelo de Random Forest está analizando la estacionalidad, tendencias y días de mes de tu historial...")
+
+    @st.cache_data(ttl=3600)
+    def entrenar_ia():
+        # Extracción segura de datos históricos
+        try:
+            # Nota: Supabase por defecto devuelve 1000 filas. Para modelos masivos, 
+            # se requerirá configurar paginación o una Vista SQL en el futuro.
+            res = conn.table("historial_ventas").select("fecha, cantidad_vendida, productos(nombre)").limit(50000).execute()
+            if not res.data: return None
+            
+            df = pd.DataFrame(res.data)
+            df['fecha'] = pd.to_datetime(df['fecha'])
+            df['Producto'] = df['productos'].apply(lambda x: x['nombre'] if x else 'Desc.')
+            
+            # Agrupación y Feature Engineering
+            df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
+            df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
+            df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
+            df_diario['Mes'] = df_diario['fecha'].dt.month
+            df_diario['Año'] = df_diario['fecha'].dt.year
+            
+            fecha_hoy = pd.to_datetime(datetime.date.today())
+            hoy_features = pd.DataFrame({
+                'Dia_Semana': [fecha_hoy.dayofweek], 'Dia_Mes': [fecha_hoy.day],
+                'Mes': [fecha_hoy.month], 'Año': [fecha_hoy.year]
+            })
+
+            predicciones = []
+            for prod in df_diario['Producto'].unique():
+                datos_prod = df_diario[df_diario['Producto'] == prod]
+                if len(datos_prod) > 10: # Mínimo de datos para entrenar
+                    X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
+                    y = datos_prod['cantidad_vendida']
+                    
+                    # Entrenamiento del Bosque Aleatorio
+                    modelo = RandomForestRegressor(n_estimators=100, random_state=42)
+                    modelo.fit(X, y)
+                    pred = modelo.predict(hoy_features)[0]
+                    
+                    predicciones.append({
+                        "Producto": prod,
+                        "Previsión IA (Uds)": int(round(pred)),
+                        "Días Históricos": len(datos_prod)
+                    })
+            
+            return pd.DataFrame(predicciones).sort_values(by="Previsión IA (Uds)", ascending=False)
+        except Exception as e:
+            st.error(f"Error entrenando IA: {e}")
+            return None
+
+    df_prev = entrenar_ia()
+    
+    if df_prev is not None and not df_prev.empty:
+        col_t, col_g = st.columns([1, 1.5])
+        with col_t:
+            st.subheader("🎯 Sugerencia para HOY")
+            st.dataframe(df_prev[['Producto', 'Previsión IA (Uds)']], hide_index=True, use_container_width=True)
+        with col_g:
+            st.subheader("Gráfico de Demanda")
+            fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
+            fig.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No hay suficientes datos en el historial para generar predicciones.")
+
+# ==========================================
+#        PANTALLA: CARGA DE DATOS (MAPEO)
+# ==========================================
+elif st.session_state.pantalla == 'Carga':
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
+    st.header("📥 Importador y Mapeo de CSV")
+    
+    archivo = st.file_uploader("Sube tu archivo CSV", type=['csv'])
+    if archivo:
+        df = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
+        cabeceras = list(df.columns)
+        
+        res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
+        m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
+        
+        st.subheader("⚙️ Configurar Columnas")
+        campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago"]
+        nuevo_mapeo = {}
+        cols = st.columns(len(campos_db))
+        
+        for i, c_db in enumerate(campos_db):
+            idx = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
+            nuevo_mapeo[c_db] = cols[i].selectbox(c_db, cabeceras, index=idx)
+            
+        if st.button("💾 GUARDAR MAPEO"):
+            conn.table("config_mapeo").upsert({"id": "historial", "mapeo": nuevo_mapeo}).execute()
+            st.success("Mapeo guardado")
+
+        st.divider()
+
+        # Detección de productos nuevos
+        nombres_csv = df[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
+        res_p = conn.table("productos").select("id, nombre").execute()
+        dict_db = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
+        nuevos = [n for n in nombres_csv if n and n not in dict_db]
+
+        if nuevos:
+            st.warning(f"🔎 {len(nuevos)} productos nuevos detectados.")
+            seleccionados = st.multiselect("Crear estos productos:", nuevos, default=[])
+            if seleccionados:
+                c_cat, c_pre = st.columns(2)
+                cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
+                pre_m = c_pre.number_input("Precio base (€):", value=0.0)
+                if st.button("✅ CREAR SELECCIONADOS"):
+                    ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
+                    conn.table("productos").insert(ins_list).execute()
+                    st.success("Productos creados.")
+                    st.rerun()
+        else:
+            st.info("✅ Todos los productos existen.")
+            if st.button("🚀 INICIAR SUBIDA MASIVA"):
+                progreso = st.progress(0)
+                lote, cont = [], 0
+                for i, fila in df.iterrows():
+                    nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
+                    if nom in dict_db:
+                        try:
+                            neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
+                            lote.append({
+                                "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
+                                "producto_id": dict_db[nom],
+                                "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
+                                "total_neto": float(neto),
+                                "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
+                            })
+                        except: pass
+                    
+                    if len(lote) >= 1000 or i == len(df) - 1:
+                        if lote:
+                            conn.table("historial_ventas").insert(lote).execute()
+                            cont += len(lote)
+                            lote = []
+                        progreso.progress((i + 1) / len(df))
+                st.success(f"¡Proceso terminado! {cont} registros subidos.")
+
+# ==========================================
+#        PANTALLA: PRODUCTOS
+# ==========================================
+elif st.session_state.pantalla == 'Productos':
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
+    st.header("📦 Listado de Productos")
+    res = conn.table("productos").select("*").execute()
+    if res.data:
+        st.dataframe(pd.DataFrame(res.data), use_container_width=True)
