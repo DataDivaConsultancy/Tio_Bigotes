@@ -84,48 +84,40 @@ elif st.session_state.pantalla == 'Carga':
             nombres_csv = df[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
             res_p = conn.table("productos").select("id, nombre").execute()
             dict_db = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
-            nuevos = [n for n in nombres_csv if n not in dict_db]
+            nuevos = [n for n in nombres_csv if n and n not in dict_db]
 
             if nuevos:
-                st.warning(f"🔎 {len(nuevos)} productos nuevos detectados.")
-                with st.container(border=True):
-                    seleccionados = st.multiselect("Crear estos productos:", nuevos, default=nuevos)
-                    c_cat, c_pre = st.columns(2)
-                    cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
-                    pre_m = c_pre.number_input("Precio base (€):", value=0.0)
-                    
-                    if st.button("✅ CREAR SELECCIONADOS"):
-                        ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
-                        conn.table("productos").insert(ins_list).execute()
-                        st.success(f"{len(seleccionados)} productos creados.")
-                        st.rerun()
-            else:
-                st.info("✅ Todos los productos existen. Listo para subir.")
-                if st.button("🚀 INICIAR SUBIDA MASIVA"):
-                    progreso = st.progress(0)
-                    lote = []
-                    total = len(df)
-                    for i, fila in df.iterrows():
-                        try:
-                            nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
-                            neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
-                            lote.append({
-                                "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
-                                "producto_id": dict_db[nom],
-                                "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
-                                "total_neto": float(neto),
-                                "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
-                            })
-                        except: pass
+                st.warning(f"🔎 Se han detectado {len(nuevos)} productos en el Excel que no están en la Base de Datos.")
+                
+                # MULTISELECT: Aquí eliges solo los que quieres
+                seleccionados = st.multiselect(
+                    "Selecciona SOLO los productos que quieras dar de alta:", 
+                    options=nuevos,
+                    default=[] # Lo dejamos vacío para que tú elijas
+                )
 
-                        if len(lote) >= 1000 or i == total - 1:
-                            if lote:
-                                conn.table("historial_ventas").insert(lote).execute()
-                                lote = []
-                            progreso.progress((i + 1) / total)
-                    st.success("¡Historial actualizado!")
-        except Exception as e:
-            st.error(f"Error: {e}")
+                if seleccionados:
+                    with st.container(border=True):
+                        st.write("### Configuración para los nuevos productos")
+                        c_cat, c_pre = st.columns(2)
+                        cat_m = c_cat.selectbox("Categoría para estos:", ["Empanada", "Bebida", "Alfajor", "Otro"])
+                        pre_m = c_pre.number_input("Precio base (€):", value=0.0)
+                        
+                        if st.button("✅ CREAR SELECCIONADOS"):
+                            ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
+                            conn.table("productos").insert(ins_list).execute()
+                            st.success(f"¡Listo! {len(seleccionados)} productos creados.")
+                            st.rerun()
+                else:
+                    st.info("Paso opcional: Selecciona productos arriba si quieres crearlos. Si no, baja directamente al botón de subida.")
+
+            # --- BOTÓN DE SUBIDA SIEMPRE DISPONIBLE ---
+            st.divider()
+            st.subheader("🚀 Subir registros al Historial")
+            
+            # El botón ahora está fuera de cualquier condición para que no te bloquee
+            if st.button("🔥 INICIAR SUBIDA MASIVA AHORA"):
+                # ... (aquí va el mismo código de subida por lotes que ya teníamos)
 
 # ==========================================
 #        PANTALLAS RESTANTES
