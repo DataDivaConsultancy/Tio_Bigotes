@@ -60,43 +60,56 @@ elif st.session_state.pantalla == 'BI':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
     st.title("📈 Business Intelligence: Tío Bigotes")
 
-    # Selector de fecha (Por defecto: Ayer, porque hoy aún no ha cerrado)
+    # Selector de fecha (Por defecto: Ayer)
     ayer_default = datetime.date.today() - datetime.timedelta(days=1)
     fecha_analisis = st.date_input("Fecha de Análisis (Cierre):", value=ayer_default)
     
     # Cálculos de fechas comerciales
-    f_ayer = pd.to_datetime(fecha_analisis)
+    f_ayer = pd.to_datetime(fecha_analisis).date()
     f_w1 = f_ayer - pd.Timedelta(days=7) # Semana anterior
-    f_ly = f_ayer - pd.Timedelta(days=364) # Año pasado (52 semanas para comparar mismos días)
-    
-    # Acumulado Mes (MTD - Month To Date)
-    f_mtd_inicio = f_ayer.replace(day=1)
+    f_ly = f_ayer - pd.Timedelta(days=364) # Año pasado (52 semanas)
+    f_mtd_inicio = f_ayer.replace(day=1) # Día 1 del mes actual
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=60) # Recarga cada minuto por si subes datos nuevos
     def cargar_datos_bi():
-        # Cargamos ventas
-        res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto, productos(nombre)").execute()
-        df_v = pd.DataFrame(res_v.data) if res_v.data else pd.DataFrame()
-        
-        # Cargamos mermas (control_diario)
-        res_m = conn.table("control_diario").select("fecha, producto_id, merma").execute()
-        df_m = pd.DataFrame(res_m.data) if res_m.data else pd.DataFrame()
-        
-        if not df_v.empty:
-            df_v['fecha'] = pd.to_datetime(df_v['fecha'])
-            df_v['Producto'] = df_v['productos'].apply(lambda x: x['nombre'] if x else 'Desc')
-        if not df_m.empty:
-            df_m['fecha'] = pd.to_datetime(df_m['fecha'])
+        try:
+            # 1. Traemos las ventas en crudo (SIN pedirle a Supabase que cruce)
+            # Limitamos a 50.000 para no reventar la memoria, pero aseguramos traer las recientes
+            res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto").order("fecha", desc=True).limit(50000).execute()
+            if not res_v.data: 
+                return pd.DataFrame(), pd.DataFrame(), "⚠️ No hay datos de ventas en la base de datos."
+            df_v = pd.DataFrame(res_v.data)
             
-        return df_v, df_m
+            # 2. Traemos los productos en crudo
+            res_p = conn.table("productos").select("id, nombre").execute()
+            df_p = pd.DataFrame(res_p.data) if res_p.data else pd.DataFrame(columns=['id', 'nombre'])
+            
+            # 3. Cruzamos Ventas + Productos en Python (Esto evita el error PGRST200)
+            if not df_p.empty:
+                df_v = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
+                df_v['Producto'] = df_v['nombre'].fillna('Desconocido')
+            else:
+                df_v['Producto'] = 'Desconocido'
+            
+            # Formateamos la fecha de ventas a 'date' para que coincida exactamente con el calendario
+            df_v['fecha'] = pd.to_datetime(df_v['fecha']).dt.date
+            
+            # 4. Cargamos las mermas de control_diario
+            res_m = conn.table("control_diario").select("fecha, producto_id, merma").order("fecha", desc=True).limit(10000).execute()
+            df_m = pd.DataFrame(res_m.data) if res_m.data else pd.DataFrame()
+            if not df_m.empty:
+                df_m['fecha'] = pd.to_datetime(df_m['fecha']).dt.date
 
-    df_ventas, df_merma = cargar_datos_bi()
+            return df_v, df_m, "✅ Datos cargados correctamente."
+        except Exception as e:
+            return pd.DataFrame(), pd.DataFrame(), f"❌ Error de carga: {e}"
+
+    df_ventas, df_merma, msg_estado = cargar_datos_bi()
 
     if df_ventas.empty:
-        st.warning("No hay datos de ventas suficientes para mostrar el Dashboard.")
+        st.warning(msg_estado)
     else:
         # --- FILTRADO DE DATOS POR FECHA ---
-        # Ventas
         v_ayer = df_ventas[df_ventas['fecha'] == f_ayer]
         v_w1 = df_ventas[df_ventas['fecha'] == f_w1]
         v_ly = df_ventas[df_ventas['fecha'] == f_ly]
@@ -107,71 +120,77 @@ elif st.session_state.pantalla == 'BI':
         m_w1 = df_merma[df_merma['fecha'] == f_w1]['merma'].sum() if not df_merma.empty else 0
         m_ly = df_merma[df_merma['fecha'] == f_ly]['merma'].sum() if not df_merma.empty else 0
 
-        # --- KPIs PRINCIPALES ---
-        fact_ayer = v_ayer['total_neto'].sum()
-        fact_w1 = v_w1['total_neto'].sum()
-        fact_ly = v_ly['total_neto'].sum()
-        
-        uds_ayer = v_ayer['cantidad_vendida'].sum()
-        uds_w1 = v_w1['cantidad_vendida'].sum()
-        uds_ly = v_ly['cantidad_vendida'].sum()
+        # --- CHIVATO PARA DEBUG (Muestra qué fechas está encontrando) ---
+        with st.expander("🛠️ Verificador de Datos Interno (Solo Admin)"):
+            st.write(f"Buscando datos para Ayer ({f_ayer}): {len(v_ayer)} registros encontrados.")
+            st.write(f"Buscando datos para W-1 ({f_w1}): {len(v_w1)} registros encontrados.")
+            st.write(f"Buscando datos para LY ({f_ly}): {len(v_ly)} registros encontrados.")
 
-        # Objetivos
-        obj_fact = fact_ly * 1.15  # Objetivo: +15% vs Last Year
-        obj_merma = uds_ayer * 0.01 # Objetivo: < 1% de las unidades vendidas
-
-        st.markdown("### 📊 Panel de Rendimiento (KPIs Diarios)")
-        c1, c2, c3, c4 = st.columns(4)
-
-        # 1. Ventas €
-        delta_ly_eur = ((fact_ayer / fact_ly) - 1) * 100 if fact_ly > 0 else 0
-        c1.metric("Ventas (€)", f"{fact_ayer:,.2f} €", f"{delta_ly_eur:.1f}% vs LY")
-        if fact_ayer >= obj_fact and obj_fact > 0:
-            c1.caption(f"✅ Objetivo Superado (+15% LY: {obj_fact:.2f}€)")
-        elif obj_fact > 0:
-            c1.caption(f"⚠️ Por debajo de Objetivo ({obj_fact:.2f}€)")
-
-        # 2. Ventas Unidades
-        delta_w1_uds = ((uds_ayer / uds_w1) - 1) * 100 if uds_w1 > 0 else 0
-        c2.metric("Unidades Vendidas", f"{uds_ayer:,.0f} uds", f"{delta_w1_uds:.1f}% vs W-1")
-
-        # 3. Merma Diaria
-        delta_merma_w1 = m_ayer - m_w1
-        merma_color = "normal" if delta_merma_w1 <= 0 else "inverse" # Rojo si sube
-        c3.metric("Merma (Uds)", f"{m_ayer:,.0f} uds", f"{delta_merma_w1:+.0f} uds vs W-1", delta_color=merma_color)
-
-        # 4. % Merma vs Objetivo
-        pct_merma = (m_ayer / uds_ayer) * 100 if uds_ayer > 0 else 0
-        if pct_merma <= 1.0:
-            c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", "✅ Cumple Obj < 1%")
+        if v_ayer.empty:
+            st.info(f"ℹ️ No se han encontrado ventas registradas para el día **{f_ayer.strftime('%d/%m/%Y')}**.")
         else:
-            c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", f"❌ Exc. Obj (< 1%)", delta_color="inverse")
+            # --- KPIs PRINCIPALES ---
+            fact_ayer = v_ayer['total_neto'].sum()
+            fact_w1 = v_w1['total_neto'].sum()
+            fact_ly = v_ly['total_neto'].sum()
+            
+            uds_ayer = v_ayer['cantidad_vendida'].sum()
+            uds_w1 = v_w1['cantidad_vendida'].sum()
+            uds_ly = v_ly['cantidad_vendida'].sum()
 
-        st.divider()
+            # Objetivos
+            obj_fact = fact_ly * 1.15  # Objetivo: +15% vs Last Year
+            obj_merma = uds_ayer * 0.01 # Objetivo: < 1% de las unidades vendidas
 
-        # --- RANKINGS DE PRODUCTOS ---
-        st.markdown("### 🏆 Ranking de Productos")
-        col_rank1, col_rank2 = st.columns(2)
+            st.markdown("### 📊 Panel de Rendimiento (KPIs Diarios)")
+            c1, c2, c3, c4 = st.columns(4)
 
-        with col_rank1:
-            st.subheader(f"Top Ventas: Ayer ({fecha_analisis.strftime('%d/%m')})")
-            if not v_ayer.empty:
+            # 1. Ventas €
+            delta_ly_eur = ((fact_ayer / fact_ly) - 1) * 100 if fact_ly > 0 else 0
+            c1.metric("Ventas (€)", f"{fact_ayer:,.2f} €", f"{delta_ly_eur:+.1f}% vs LY")
+            if fact_ayer >= obj_fact and obj_fact > 0:
+                c1.caption(f"✅ Objetivo Superado (+15% LY: {obj_fact:.2f}€)")
+            elif obj_fact > 0:
+                c1.caption(f"⚠️ Por debajo de Objetivo ({obj_fact:.2f}€)")
+
+            # 2. Ventas Unidades
+            delta_w1_uds = ((uds_ayer / uds_w1) - 1) * 100 if uds_w1 > 0 else 0
+            c2.metric("Unidades Vendidas", f"{uds_ayer:,.0f} uds", f"{delta_w1_uds:+.1f}% vs W-1")
+
+            # 3. Merma Diaria
+            delta_merma_w1 = m_ayer - m_w1
+            merma_color = "normal" if delta_merma_w1 <= 0 else "inverse" # Rojo si sube
+            c3.metric("Merma (Uds)", f"{m_ayer:,.0f} uds", f"{delta_merma_w1:+.0f} uds vs W-1", delta_color=merma_color)
+
+            # 4. % Merma vs Objetivo
+            pct_merma = (m_ayer / uds_ayer) * 100 if uds_ayer > 0 else 0
+            if pct_merma <= 1.0:
+                c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", "✅ Cumple Obj < 1%")
+            else:
+                c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", f"❌ Exc. Obj (< 1%)", delta_color="inverse")
+
+            st.divider()
+
+            # --- RANKINGS DE PRODUCTOS ---
+            st.markdown("### 🏆 Ranking de Productos")
+            col_rank1, col_rank2 = st.columns(2)
+
+            with col_rank1:
+                st.subheader(f"Top Ventas: Ayer ({fecha_analisis.strftime('%d/%m')})")
                 rank_ayer = v_ayer.groupby('Producto')['cantidad_vendida'].sum().reset_index()
                 rank_ayer = rank_ayer.sort_values(by='cantidad_vendida', ascending=False).head(10)
                 rank_ayer.index += 1
                 st.dataframe(rank_ayer.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
-            else:
-                st.info("No hay ventas registradas en esta fecha.")
 
-        with col_rank2:
-            st.subheader("Top Ventas: Acumulado Mes (MTD)")
-            if not v_mtd.empty:
-                rank_mtd = v_mtd.groupby('Producto')['cantidad_vendida'].sum().reset_index()
-                rank_mtd = rank_mtd.sort_values(by='cantidad_vendida', ascending=False).head(10)
-                rank_mtd.index += 1
-                st.dataframe(rank_mtd.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
-            else:
-                st.info("No hay ventas en lo que va de mes.")
+            with col_rank2:
+                st.subheader("Top Ventas: Acumulado Mes (MTD)")
+                if not v_mtd.empty:
+                    rank_mtd = v_mtd.groupby('Producto')['cantidad_vendida'].sum().reset_index()
+                    rank_mtd = rank_mtd.sort_values(by='cantidad_vendida', ascending=False).head(10)
+                    rank_mtd.index += 1
+                    st.dataframe(rank_mtd.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
+                else:
+                    st.info("No hay ventas en lo que va de mes.")
 
 # ==========================================
 #        PANTALLA: GESTIÓN EMPLEADOS
