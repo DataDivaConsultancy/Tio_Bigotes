@@ -44,7 +44,7 @@ if st.session_state.pantalla == 'Home':
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("📈 1. BI & ANALÍTICA"): ir_a('BI')
+        if st.button("📈 1. BI & AUDITORÍA (NUEVO)"): ir_a('BI')
         if st.button("🧠 2. IA PREDICTIVA"): ir_a('Dashboard')
     with col2:
         if st.button("📋 3. HOJA CONTROL DIARIO"): ir_a('Operativa')
@@ -54,11 +54,11 @@ if st.session_state.pantalla == 'Home':
         if st.button("👥 GESTIÓN EMPLEADOS"): ir_a('Empleados')
 
 # ==========================================
-#        PANTALLA: BI & ANALÍTICA
+#        PANTALLA: BI, ANALÍTICA Y AUDITORÍA
 # ==========================================
 elif st.session_state.pantalla == 'BI':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("📈 Business Intelligence: Tío Bigotes")
+    st.title("📈 Business Intelligence y Auditoría")
 
     ayer_default = datetime.date.today() - datetime.timedelta(days=1)
     fecha_analisis = st.date_input("Fecha de Análisis (Cierre):", value=ayer_default)
@@ -68,56 +68,88 @@ elif st.session_state.pantalla == 'BI':
     f_ly = f_ayer - pd.Timedelta(days=364) 
     f_mtd_inicio = f_ayer.replace(day=1) 
 
-    @st.cache_data(ttl=60) 
-    def cargar_datos_bi():
+    def cargar_datos_bi(d_ayer, d_w1, d_ly, d_mtd):
         try:
-            res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto").order("fecha", desc=True).limit(50000).execute()
-            if not res_v.data: 
-                return pd.DataFrame(), pd.DataFrame(), "⚠️ No hay datos de ventas en la base de datos."
-            df_v = pd.DataFrame(res_v.data)
+            # --- 1. DATOS DE VENTAS TPV (CSV) ---
+            res_mtd = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto").gte("fecha", str(d_mtd)).lte("fecha", str(d_ayer)).limit(50000).execute()
+            res_w1 = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto").eq("fecha", str(d_w1)).limit(10000).execute()
+            res_ly = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto").eq("fecha", str(d_ly)).limit(10000).execute()
+            
+            df_v = pd.concat([
+                pd.DataFrame(res_mtd.data) if res_mtd.data else pd.DataFrame(),
+                pd.DataFrame(res_w1.data) if res_w1.data else pd.DataFrame(),
+                pd.DataFrame(res_ly.data) if res_ly.data else pd.DataFrame()
+            ], ignore_index=True)
             
             res_p = conn.table("productos").select("id, nombre").execute()
             df_p = pd.DataFrame(res_p.data) if res_p.data else pd.DataFrame(columns=['id', 'nombre'])
             
-            if not df_p.empty:
+            if not df_v.empty and not df_p.empty:
                 df_v = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
                 df_v['Producto'] = df_v['nombre'].fillna('Desconocido')
+                df_v['fecha'] = pd.to_datetime(df_v['fecha']).dt.date
             else:
-                df_v['Producto'] = 'Desconocido'
+                if not df_v.empty: df_v['Producto'] = 'Desconocido'
             
-            df_v['fecha'] = pd.to_datetime(df_v['fecha']).dt.date
+            # --- 2. DATOS DE CONTROL DIARIO (HUMANO) ---
+            # Ahora traemos TODO el inventario: merma, stock_inicial, horneados y resto
+            columnas_cd = "fecha, producto_id, merma, stock_inicial, horneados, resto"
+            rm_mtd = conn.table("control_diario").select(columnas_cd).gte("fecha", str(d_mtd)).lte("fecha", str(d_ayer)).limit(10000).execute()
+            rm_w1 = conn.table("control_diario").select(columnas_cd).eq("fecha", str(d_w1)).limit(5000).execute()
+            rm_ly = conn.table("control_diario").select(columnas_cd).eq("fecha", str(d_ly)).limit(5000).execute()
             
-            res_m = conn.table("control_diario").select("fecha, producto_id, merma").order("fecha", desc=True).limit(10000).execute()
-            df_m = pd.DataFrame(res_m.data) if res_m.data else pd.DataFrame()
+            df_m = pd.concat([
+                pd.DataFrame(rm_mtd.data) if rm_mtd.data else pd.DataFrame(),
+                pd.DataFrame(rm_w1.data) if rm_w1.data else pd.DataFrame(),
+                pd.DataFrame(rm_ly.data) if rm_ly.data else pd.DataFrame()
+            ], ignore_index=True)
+            
             if not df_m.empty:
                 df_m['fecha'] = pd.to_datetime(df_m['fecha']).dt.date
+                # Cruzamos con nombres de productos para la auditoría
+                if not df_p.empty:
+                    df_m = pd.merge(df_m, df_p, left_on='producto_id', right_on='id', how='left')
+                    df_m['Producto'] = df_m['nombre'].fillna('Desconocido')
+                else:
+                    df_m['Producto'] = 'Desconocido'
+                
+                # Calculamos la Venta Teórica (Lo que el empleado dice que se esfumó de la tienda)
+                df_m['venta_teorica'] = df_m['stock_inicial'] + df_m['horneados'] - df_m['merma'] - df_m['resto']
 
-            return df_v, df_m, "✅ Datos cargados correctamente."
+            return df_v, df_m, "✅ Datos extraídos correctamente."
         except Exception as e:
             return pd.DataFrame(), pd.DataFrame(), f"❌ Error de carga: {e}"
 
-    df_ventas, df_merma, msg_estado = cargar_datos_bi()
+    with st.spinner("Descargando y cruzando datos de inventario y TPV..."):
+        df_ventas, df_control, msg_estado = cargar_datos_bi(f_ayer, f_w1, f_ly, f_mtd_inicio)
 
     if df_ventas.empty:
-        st.warning(msg_estado)
+        st.warning(f"No hay ventas registradas en el TPV para las fechas seleccionadas.")
     else:
+        # Filtrado de Ventas TPV
         v_ayer = df_ventas[df_ventas['fecha'] == f_ayer]
         v_w1 = df_ventas[df_ventas['fecha'] == f_w1]
         v_ly = df_ventas[df_ventas['fecha'] == f_ly]
         v_mtd = df_ventas[(df_ventas['fecha'] >= f_mtd_inicio) & (df_ventas['fecha'] <= f_ayer)]
         
-        m_ayer = df_merma[df_merma['fecha'] == f_ayer]['merma'].sum() if not df_merma.empty else 0
-        m_w1 = df_merma[df_merma['fecha'] == f_w1]['merma'].sum() if not df_merma.empty else 0
-        m_ly = df_merma[df_merma['fecha'] == f_ly]['merma'].sum() if not df_merma.empty else 0
+        # Filtrado de Control Diario (Mermas e Inventario Físico)
+        cd_ayer = df_control[df_control['fecha'] == f_ayer] if not df_control.empty else pd.DataFrame()
+        cd_w1 = df_control[df_control['fecha'] == f_w1] if not df_control.empty else pd.DataFrame()
+        cd_ly = df_control[df_control['fecha'] == f_ly] if not df_control.empty else pd.DataFrame()
 
-        with st.expander("🛠️ Verificador de Datos Interno (Solo Admin)"):
-            st.write(f"Buscando datos para Ayer ({f_ayer}): {len(v_ayer)} registros encontrados.")
-            st.write(f"Buscando datos para W-1 ({f_w1}): {len(v_w1)} registros encontrados.")
-            st.write(f"Buscando datos para LY ({f_ly}): {len(v_ly)} registros encontrados.")
+        m_ayer_sum = cd_ayer['merma'].sum() if not cd_ayer.empty else 0
+        m_w1_sum = cd_w1['merma'].sum() if not cd_w1.empty else 0
+        m_ly_sum = cd_ly['merma'].sum() if not cd_ly.empty else 0
+
+        with st.expander("🛠️ Verificador de Historial (Solo Admin)"):
+            st.write(f"Ventas leídas para el {f_ayer}: **{len(v_ayer)}** filas.")
+            st.write(f"Ventas leídas para W-1 ({f_w1}): **{len(v_w1)}** filas.")
+            st.write(f"Hojas de control encontradas para el {f_ayer}: **{len(cd_ayer)}** registros.")
 
         if v_ayer.empty:
-            st.info(f"ℹ️ No se han encontrado ventas registradas para el día **{f_ayer.strftime('%d/%m/%Y')}**.")
+            st.info(f"ℹ️ La caja no registró ventas el día **{f_ayer.strftime('%d/%m/%Y')}**.")
         else:
+            # --- 1. KPIs DIARIOS ---
             fact_ayer = v_ayer['total_neto'].sum()
             fact_w1 = v_w1['total_neto'].sum()
             fact_ly = v_ly['total_neto'].sum()
@@ -129,50 +161,82 @@ elif st.session_state.pantalla == 'BI':
             obj_fact = fact_ly * 1.15  
             obj_merma = uds_ayer * 0.01 
 
-            st.markdown("### 📊 Panel de Rendimiento (KPIs Diarios)")
+            st.markdown("### 📊 Panel de Rendimiento y Objetivos")
             c1, c2, c3, c4 = st.columns(4)
 
             delta_ly_eur = ((fact_ayer / fact_ly) - 1) * 100 if fact_ly > 0 else 0
             c1.metric("Ventas (€)", f"{fact_ayer:,.2f} €", f"{delta_ly_eur:+.1f}% vs LY")
-            if fact_ayer >= obj_fact and obj_fact > 0:
-                c1.caption(f"✅ Objetivo Superado (+15% LY: {obj_fact:.2f}€)")
-            elif obj_fact > 0:
-                c1.caption(f"⚠️ Por debajo de Objetivo ({obj_fact:.2f}€)")
+            if fact_ayer >= obj_fact and obj_fact > 0: c1.caption(f"✅ Obj. Superado (+15% LY: {obj_fact:.2f}€)")
+            elif obj_fact > 0: c1.caption(f"⚠️ Debajo de Obj. ({obj_fact:.2f}€)")
 
             delta_w1_uds = ((uds_ayer / uds_w1) - 1) * 100 if uds_w1 > 0 else 0
             c2.metric("Unidades Vendidas", f"{uds_ayer:,.0f} uds", f"{delta_w1_uds:+.1f}% vs W-1")
 
-            delta_merma_w1 = m_ayer - m_w1
+            delta_merma_w1 = m_ayer_sum - m_w1_sum
             merma_color = "normal" if delta_merma_w1 <= 0 else "inverse" 
-            c3.metric("Merma (Uds)", f"{m_ayer:,.0f} uds", f"{delta_merma_w1:+.0f} uds vs W-1", delta_color=merma_color)
+            c3.metric("Merma (Uds)", f"{m_ayer_sum:,.0f} uds", f"{delta_merma_w1:+.0f} uds vs W-1", delta_color=merma_color)
 
-            pct_merma = (m_ayer / uds_ayer) * 100 if uds_ayer > 0 else 0
-            if pct_merma <= 1.0:
-                c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", "✅ Cumple Obj < 1%")
-            else:
-                c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", f"❌ Exc. Obj (< 1%)", delta_color="inverse")
+            pct_merma = (m_ayer_sum / uds_ayer) * 100 if uds_ayer > 0 else 0
+            if pct_merma <= 1.0: c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", "✅ Cumple Obj < 1%")
+            else: c4.metric("% Merma / Venta", f"{pct_merma:.2f}%", f"❌ Exc. Obj (< 1%)", delta_color="inverse")
 
             st.divider()
 
+            # --- 2. EL MÓDULO DE AUDITORÍA (NUEVO) ---
+            st.markdown("### 🕵️ Auditoría de Cajas (Inventario Físico vs TPV)")
+            if cd_ayer.empty:
+                st.warning(f"⚠️ El empleado no rellenó la Hoja de Control Diario el día {f_ayer.strftime('%d/%m/%Y')}. Imposible auditar.")
+            else:
+                st.info("Compara lo que el empleado declara que desapareció de la vitrina vs lo que la caja registradora cobró realmente.")
+                
+                # Agrupamos las ventas teóricas (Hoja de control)
+                teo = cd_ayer.groupby('Producto')['venta_teorica'].sum().reset_index()
+                teo.rename(columns={'venta_teorica': 'Venta Teórica (Empleado)'}, inplace=True)
+                
+                # Agrupamos las ventas reales (CSV / TPV)
+                real = v_ayer.groupby('Producto')['cantidad_vendida'].sum().reset_index()
+                real.rename(columns={'cantidad_vendida': 'Venta Registrada (Caja)'}, inplace=True)
+                
+                # Cruzamos para buscar a los mentirosos / despistados
+                auditoria = pd.merge(teo, real, on='Producto', how='outer').fillna(0)
+                auditoria['Venta Teórica (Empleado)'] = auditoria['Venta Teórica (Empleado)'].astype(int)
+                auditoria['Venta Registrada (Caja)'] = auditoria['Venta Registrada (Caja)'].astype(int)
+                
+                # Calculamos el agujero (Descuadre)
+                auditoria['Descuadre (Faltante)'] = auditoria['Venta Teórica (Empleado)'] - auditoria['Venta Registrada (Caja)']
+                
+                # Filtramos para no mostrar productos que no se movieron
+                auditoria = auditoria[(auditoria['Venta Teórica (Empleado)'] > 0) | (auditoria['Venta Registrada (Caja)'] > 0)]
+                
+                # Resaltar en rojo los descuadres con Pandas Styling
+                def color_descuadre(val):
+                    if val > 0: return 'color: red; font-weight: bold' # Faltan productos en caja
+                    elif val < 0: return 'color: orange' # Se cobró de más o se horneó sin apuntar
+                    return 'color: green' # Cuadre perfecto
+                
+                st.dataframe(auditoria.style.map(color_descuadre, subset=['Descuadre (Faltante)']), use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # --- 3. RANKINGS ---
             st.markdown("### 🏆 Ranking de Productos")
             col_rank1, col_rank2 = st.columns(2)
 
             with col_rank1:
-                st.subheader(f"Top Ventas: {fecha_analisis.strftime('%d/%m')}")
+                st.subheader("Top Ventas: Ayer")
                 rank_ayer = v_ayer.groupby('Producto')['cantidad_vendida'].sum().reset_index()
                 rank_ayer = rank_ayer.sort_values(by='cantidad_vendida', ascending=False).head(10)
                 rank_ayer.index += 1
                 st.dataframe(rank_ayer.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
 
             with col_rank2:
-                st.subheader("Top Ventas: Acumulado Mes (MTD)")
+                st.subheader("Top Ventas: Acumulado Mes")
                 if not v_mtd.empty:
                     rank_mtd = v_mtd.groupby('Producto')['cantidad_vendida'].sum().reset_index()
                     rank_mtd = rank_mtd.sort_values(by='cantidad_vendida', ascending=False).head(10)
                     rank_mtd.index += 1
                     st.dataframe(rank_mtd.style.format({"cantidad_vendida": "{:,.0f}"}), use_container_width=True)
-                else:
-                    st.info("No hay ventas en lo que va de mes.")
+
 
 # ==========================================
 #        PANTALLA: IA PREDICTIVA
@@ -402,7 +466,6 @@ elif st.session_state.pantalla == 'Carga':
             progreso = st.progress(0)
             lote, cont = [], 0
             
-            # EL PARCHE DE LA FECHA EUROPEA
             df[nuevo_mapeo['fecha']] = pd.to_datetime(df[nuevo_mapeo['fecha']], dayfirst=True, errors='coerce')
             
             for i, fila in df.iterrows():
