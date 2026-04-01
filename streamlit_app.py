@@ -1,30 +1,29 @@
 import streamlit as st
 import pandas as pd
 import datetime
+from streamlit_gsheets import GSheetConnection
 
-# --- CONFIGURACIÓN DE LA APP ---
-st.set_page_config(page_title="Tienda - Panel Operativo", layout="wide", initial_sidebar_state="collapsed")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Panel Tío Bigotes", layout="wide")
 
-# --- ESTILOS CSS ---
+# --- CONEXIÓN A GOOGLE SHEETS ---
+conn = st.connection("gsheets", type=GSheetConnection)
+
+# --- ESTILOS ---
 st.markdown("""
     <style>
     div.stButton > button:first-child {
-        height: 100px; width: 100%; font-size: 20px; font-weight: bold;
-        border-radius: 12px; background-color: #ff9800; color: white; border: none; margin-bottom: 15px;
+        height: 90px; width: 100%; font-size: 20px; font-weight: bold;
+        border-radius: 12px; background-color: #ff9800; color: white;
     }
-    div.stButton > button:first-child:hover { background-color: #e68a00; border: 2px solid #333; }
-    .st-emotion-cache-1vt4ygl button { height: auto; font-size: 16px; background-color: #f0f2f6; color: black; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- NAVEGACIÓN ---
 if 'pantalla' not in st.session_state:
     st.session_state.pantalla = 'Home'
 
 def ir_a(nueva_pantalla):
     st.session_state.pantalla = nueva_pantalla
-
-sabores = ["CARNE CUCHILLO", "POLLO", "JAMON Y QUESO", "CAPRESE", "CARNE PICANTE", "CARNE SUAVE"]
 
 # ==========================================
 #             PANTALLA: HOME
@@ -32,115 +31,65 @@ sabores = ["CARNE CUCHILLO", "POLLO", "JAMON Y QUESO", "CAPRESE", "CARNE PICANTE
 if st.session_state.pantalla == 'Home':
     col_logo_1, col_logo_2, col_logo_3 = st.columns([1, 2, 1])
     with col_logo_2:
-        try:
-            st.image('image.png', use_column_width=True)
-        except:
-            st.warning("⚠️ Sube la imagen 'image.png' a tu GitHub.")
+        try: st.image('image.png', use_column_width=True)
+        except: st.warning("Sube 'image.png' a GitHub")
     
-    st.subheader("Menú Principal de Gestión")
-    st.write(f"📍 Diputació 159 | {datetime.date.today().strftime('%d/%m/%Y')}")
+    st.subheader("Menú Principal")
     st.divider()
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📊 1. DASHBOARD"): ir_a('Dashboard')
-        if st.button("📅 3. HISTORIAL & CALENDARIO"): ir_a('Historial')
+        if st.button("📊 1. VER VENTAS (DASHBOARD)"): ir_a('Dashboard')
     with col2:
-        if st.button("🔥 2. OPERATIVA DE HOY"): ir_a('Operativa')
-        if st.button("🛒 4. COMPRAS"): ir_a('Compras')
-    
-    if st.button("⚙️ 5. CONFIGURACIÓN (FESTIVOS)"): ir_a('Configuracion')
+        if st.button("🔥 2. REGISTRAR HORNEADO"): ir_a('Operativa')
 
 # ==========================================
-#        PANTALLA: 1. DASHBOARD
+#        PANTALLA: 1. DASHBOARD (LECTURA)
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("📊 Dashboard Analítico")
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.title("📊 Análisis de Ventas Real")
     
-    st.subheader("💰 Facturación vs Año Anterior (LY)")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(label="Ayer vs Mismo día LY", value="850 €", delta="12%") 
-    c2.metric(label="Mes en curso vs LY", value="18,400 €", delta="-2%")
-    c3.metric(label="YTD vs LY", value="73,432 €", delta="11.9%")
-    
-    st.divider()
-    st.subheader("🗑️ Control de Mermas (Unidades)")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric(label="Mermas Ayer", value="12 uds", delta="Pollo (4), Caprese (3)", delta_color="off")
-    m2.metric(label="Acumulado Semana", value="45 uds")
-    m3.metric(label="Acumulado Mes", value="180 uds")
-    m4.metric(label="Acumulado Año", value="540 uds")
+    try:
+        # Intentamos leer la pestaña "VENTAS" de tu Sheet
+        df_ventas = conn.read(worksheet="VENTAS")
+        st.success("✅ Datos cargados desde Google Sheets")
+        
+        # Muestra las últimas 5 ventas registradas
+        st.write("Últimos registros en el Excel:")
+        st.dataframe(df_ventas.tail(5), use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"No pude leer la pestaña 'VENTAS'. Revisa que el nombre sea exacto en el Sheet.")
+        st.info("Asegúrate de haber compartido el Sheet con: streamlit-app@streamlit-app-274213.iam.gserviceaccount.com")
 
 # ==========================================
-#   PANTALLA: 2. OPERATIVA DE HOY
+#   PANTALLA: 2. OPERATIVA (ESCRITURA)
 # ==========================================
 elif st.session_state.pantalla == 'Operativa':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🔥 Operativa del Día")
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.title("👨‍🍳 Registro de Horneado")
     
-    st.subheader("🚩 1. Contexto del Día")
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        tipo_dia = st.selectbox("¿Qué tipo de día es hoy?", 
-                                ["Día Normal", "Festivo Local", "Festivo Nacional", "Evento", "Día de Lluvia"])
-    with col_c2:
-        st.text_input("Nota adicional (ej: Partido, Corte de calle)")
-    
-    st.divider()
-    
-    st.subheader("👨‍🍳 2. Sugerencia de Horneado (IA)")
-    col_h1, col_h2 = st.columns(2)
-    col_h1.success("**TANDA 1 (Apertura)**\n- 30 Carne Cuchillo\n- 20 Pollo\n- 10 Jamón y Queso")
-    col_h2.warning("**TANDA 2 (Tarde)**\n- 15 Carne Cuchillo\n- 10 Caprese")
-    
-    st.divider()
-
-    st.subheader("📝 3. Registrar Horneado")
-    col_r1, col_r2, col_r3 = st.columns([2, 1, 1])
-    with col_r1:
-        sabor_horn = st.selectbox("Sabor a hornear", sabores)
-    with col_r2:
-        cant_horn = st.number_input("Cantidad", min_value=1, max_value=60, step=1)
-    with col_r3:
-        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-        if st.button("➕ Guardar Bandeja"):
-            st.success(f"✅ Registradas {cant_horn} uds de {sabor_horn}.")
-
-    st.divider()
-    
-    st.subheader("🌙 4. Cierre de Caja y Merma")
-    with st.expander("Haz clic aquí para realizar el cierre del día"):
-        for s in sabores:
-            st.number_input(f"Resto de {s}", min_value=0, step=1, key=f"resto_{s}")
-        if st.button("Calcular Merma y Cerrar Día"):
-            st.error("🚨 **MERMA DETECTADA**: Retirar mermas de más de 3 días.")
-            st.success("✅ Día cerrado.")
-
-# ==========================================
-#   PANTALLA: 3. HISTORIAL & CALENDARIO
-# ==========================================
-elif st.session_state.pantalla == 'Historial':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("📅 Historial de Ventas")
-    st.date_input("Selecciona una fecha:", datetime.date.today() - datetime.timedelta(days=1))
-    st.info("Mostrando datos simulados.")
-
-# ==========================================
-#        PANTALLA: 4. COMPRAS
-# ==========================================
-elif st.session_state.pantalla == 'Compras':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🛒 Previsión y Pedido de Compras")
-    datos_compra = {"Sabor": sabores[:4], "PEDIDO FINAL (Cajas)": [4, 3, 2, 1]}
-    st.data_editor(pd.DataFrame(datos_compra), use_container_width=True)
-    if st.button("📤 Guardar Previsión"):
-        st.success("¡Pedido guardado!")
-
-# ==========================================
-#      PANTALLA: 5. CONFIGURACIÓN
-# ==========================================
-elif st.session_state.pantalla == 'Configuracion':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("⚙️ Configuración")
-    st.write("Gestiona aquí los festivos.")
+    with st.form("form_horneado"):
+        sabor = st.selectbox("Sabor", ["Carne Cuchillo", "Pollo", "J&Q", "Caprese", "Carne Picante", "Carne Suave"])
+        cantidad = st.number_input("Cantidad (Unidades)", min_value=1, step=1)
+        enviar = st.form_submit_button("💾 GUARDAR EN EXCEL")
+        
+        if enviar:
+            # Creamos la línea de datos
+            nueva_fila = pd.DataFrame([{
+                "Fecha": datetime.date.today().strftime("%Y-%m-%d"),
+                "Sabor": sabor,
+                "Cantidad": cantidad
+            }])
+            
+            # Intentamos escribir en la pestaña "HORNEADOS"
+            try:
+                # Leemos lo que hay, añadimos lo nuevo y guardamos
+                df_actual = conn.read(worksheet="HORNEADOS")
+                df_final = pd.concat([df_actual, nueva_fila], ignore_index=True)
+                conn.update(worksheet="HORNEADOS", data=df_final)
+                st.balloons()
+                st.success(f"¡Guardado! {cantidad} de {sabor} registradas.")
+            except:
+                st.error("Error al guardar. ¿Existe la pestaña 'HORNEADOS' en tu Sheet?")
