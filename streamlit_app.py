@@ -1,77 +1,112 @@
 import streamlit as st
 import pandas as pd
 from st_supabase_connection import SupabaseConnection
-import plotly.express as px
 import datetime
+import re
+import plotly.express as px
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
 
-# --- CONEXIÓN DIRECTA ---
-# Usamos st.secrets directamente para que no haya pérdida de datos
+# --- CONEXIÓN ---
 try:
-    if "connections" not in st.secrets:
-        st.error("Faltan los Secrets en la configuración de Streamlit.")
-        st.stop()
-        
-    conn = st.connection(
-        "supabase",
-        type=SupabaseConnection,
-        url=st.secrets["connections"]["supabase"]["url"],
-        key=st.secrets["connections"]["supabase"]["key"]
-    )
-except Exception as e:
-    st.error(f"Error de conexión: {e}")
+    conn = st.connection("supabase", type=SupabaseConnection)
+except:
+    st.error("Error de conexión. Revisa los Secrets.")
     st.stop()
 
-# --- NAVEGACIÓN ---
-if 'pantalla' not in st.session_state:
-    st.session_state.pantalla = 'Home'
+# --- FUNCIONES AUXILIARES ---
+def limpiar_nombre(texto):
+    texto = str(texto).upper().strip()
+    texto = re.sub(r'^\d+[\.\s\-]*', '', texto)
+    return texto.strip()
 
-def ir_a(p):
-    st.session_state.pantalla = p
+if 'pantalla' not in st.session_state: st.session_state.pantalla = 'Home'
+def ir_a(p): st.session_state.pantalla = p
 
 # ==========================================
 #             PANTALLA: HOME
 # ==========================================
 if st.session_state.pantalla == 'Home':
-    st.title("🥐 Tío Bigotes - Panel Principal")
-    st.divider()
-    
+    st.title("🥐 Tío Bigotes - Gestión Total")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📊 VER DASHBOARD"): ir_a('Dashboard')
-        if st.button("🔥 CONTROL DIARIO"): ir_a('Operativa')
+        if st.button("📊 1. VER DASHBOARD"): ir_a('Dashboard')
+        if st.button("🔥 2. CONTROL DIARIO"): ir_a('Operativa')
     with col2:
-        if st.button("📦 PRODUCTOS"): ir_a('Productos')
-        if st.button("📥 CARGAR DATOS"): ir_a('Carga')
+        if st.button("📦 3. GESTIONAR PRODUCTOS"): ir_a('Productos')
+        if st.button("📥 4. CARGAR DATOS (MAPEO)"): ir_a('Carga')
 
 # ==========================================
-#        PANTALLA: DASHBOARD (SEGURO)
+#        PANTALLA: 4. CARGA INTELIGENTE
 # ==========================================
-elif st.session_state.pantalla == 'Dashboard':
+elif st.session_state.pantalla == 'Carga':
     st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📊 Análisis de Ventas")
+    st.header("📥 Importador con Mapeo y Auto-creación")
     
-    try:
-        # Limitamos la consulta inicial para evitar que se cuelgue
-        res = conn.table("historial_ventas").select("fecha, total_neto").limit(10000).execute()
-        
-        if res.data:
-            df = pd.DataFrame(res.data)
-            st.success(f"Analizando los últimos {len(df)} registros...")
+    archivo = st.file_uploader("Sube tu CSV", type=['csv'])
+    
+    if archivo:
+        try:
+            df = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
+            cabeceras = list(df.columns)
             
-            df['fecha'] = pd.to_datetime(df['fecha'])
-            df_evo = df.groupby('fecha')['total_neto'].sum().reset_index()
-            
-            fig = px.line(df_evo, x='fecha', y='total_neto', title="Tendencia de Ventas")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay datos todavía. Ve a 'Cargar Datos'.")
-    except Exception as e:
-        st.error(f"Error al leer datos: {e}")
+            # 1. RECUPERAR MAPEO
+            res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
+            m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
 
-# [El resto de pantallas se mantienen simples para probar conexión]
-else:
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.write(f"Estás en la pantalla: {st.session_state.pantalla}")
+            st.subheader("⚙️ Configurar Mapeo")
+            campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago"]
+            nuevo_mapeo = {}
+            cols = st.columns(len(campos_db))
+            for i, c_db in enumerate(campos_db):
+                idx = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
+                nuevo_mapeo[c_db] = cols[i].selectbox(c_db, cabeceras, index=idx)
+
+            if st.button("💾 GUARDAR MAPEO"):
+                conn.table("config_mapeo").upsert({"id": "historial", "mapeo": nuevo_mapeo}).execute()
+                st.success("Mapeo guardado.")
+
+            st.divider()
+
+            # 2. DETECTAR PRODUCTOS NUEVOS
+            nombres_csv = df[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
+            res_p = conn.table("productos").select("id, nombre").execute()
+            dict_db = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
+            nuevos = [n for n in nombres_csv if n not in dict_db]
+
+            if nuevos:
+                st.warning(f"🔎 Se han detectado {len(nuevos)} productos nuevos.")
+                with st.container(border=True):
+                    st.write("### Creación Masiva")
+                    seleccionados = st.multiselect("Crear estos productos:", nuevos, default=nuevos)
+                    c_cat, c_pre = st.columns(2)
+                    cat_m = c_cat.selectbox("Categoría:", ["Empanada", "Bebida", "Alfajor", "Otro"])
+                    pre_m = c_pre.number_input("Precio base (€):", value=0.0)
+                    
+                    if st.button("✅ CREAR SELECCIONADOS"):
+                        ins_list = [{"nombre": n, "categoria": cat_m, "precio_unidad": pre_m} for n in seleccionados]
+                        conn.table("productos").insert(ins_list).execute()
+                        st.success(f"{len(seleccionados)} productos creados.")
+                        st.rerun()
+            else:
+                st.info("✅ Todos los productos existen. Listo para subir.")
+                if st.button("🚀 INICIAR SUBIDA MASIVA"):
+                    progreso = st.progress(0)
+                    lote = []
+                    total = len(df)
+                    for i, fila in df.iterrows():
+                        nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
+                        neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
+                        try:
+                            lote.append({
+                                "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
+                                "producto_id": dict_db[nom],
+                                "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
+                                "total_neto": float(neto),
+                                "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
+                            })
+                        except: pass
+
+                        if len(lote) >= 1000 or i == total - 1:
+                            conn.table("historial_ventas").insert(lote).execute()
