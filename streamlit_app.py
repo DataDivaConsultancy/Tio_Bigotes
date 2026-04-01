@@ -225,11 +225,16 @@ elif st.session_state.pantalla == 'Dashboard':
             df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_nacionales else 0)
             df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_nacionales else 0)
             
-            # Variables de HOY 
+           # Variables de HOY 
             fecha_hoy = pd.to_datetime(datetime.date.today())
             hoy_features = pd.DataFrame({
                 'Dia_Semana': [fecha_hoy.dayofweek], 
-                'Dia_Mes': [fecha_
+                'Dia_Mes': [fecha_hoy.day],
+                'Mes': [fecha_hoy.month], 
+                'Año': [fecha_hoy.year],
+                'Es_Festivo': [1 if fecha_hoy in festivos_nacionales else 0],
+                'Es_Vispera': [1 if (fecha_hoy + pd.Timedelta(days=1)) in festivos_nacionales else 0]
+            })
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
