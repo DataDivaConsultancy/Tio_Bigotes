@@ -96,9 +96,9 @@ elif st.session_state.pantalla == 'Carga':
                     lote = []
                     total = len(df)
                     for i, fila in df.iterrows():
-                        nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
-                        neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
                         try:
+                            nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
+                            neto = str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')
                             lote.append({
                                 "fecha": pd.to_datetime(fila[nuevo_mapeo['fecha']]).strftime('%Y-%m-%d'),
                                 "producto_id": dict_db[nom],
@@ -106,7 +106,32 @@ elif st.session_state.pantalla == 'Carga':
                                 "total_neto": float(neto),
                                 "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']])
                             })
-                        except: pass
+                        except Exception as e:
+                            pass # Si una fila está mal, la saltamos
 
                         if len(lote) >= 1000 or i == total - 1:
-                            conn.table("historial_ventas").insert(lote).execute()
+                            if lote:
+                                conn.table("historial_ventas").insert(lote).execute()
+                                lote = []
+                            progreso.progress((i + 1) / total)
+                    st.success("¡Historial actualizado!")
+
+        except Exception as e:
+            st.error(f"Error general en la carga: {e}")
+
+# ==========================================
+#        PANTALLAS: PRODUCTOS, OPERATIVA Y DASHBOARD
+# ==========================================
+elif st.session_state.pantalla == 'Productos':
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.header("📦 Listado de Productos")
+    res = conn.table("productos").select("*").execute()
+    if res.data: st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+
+elif st.session_state.pantalla == 'Operativa':
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.header("🔥 Registro Diario")
+    st.write("Pantalla para el control de stock diario.")
+
+elif st.session_state.pantalla == 'Dashboard':
+    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
