@@ -7,7 +7,14 @@ st.set_page_config(page_title="Tío Bigotes - Gestión", layout="wide")
 
 # --- CONEXIÓN A SUPABASE ---
 # Asegúrate de tener url y key en Streamlit Secrets
-conn = st.connection("supabase", type=SupabaseConnection)
+# Conexión manual directa para evitar errores de autodetector
+try:
+    url = st.secrets["connections"]["supabase"]["url"]
+    key = st.secrets["connections"]["supabase"]["key"]
+    conn = st.connection("supabase", type=SupabaseConnection, url=url, key=key)
+except Exception as e:
+    st.error("⚠️ Error en los Secrets: No se encuentran las llaves 'url' o 'key'.")
+    st.stop()
 
 # --- ESTILOS ---
 st.markdown("""
