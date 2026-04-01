@@ -186,52 +186,66 @@ elif st.session_state.pantalla == 'Operativa':
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva de Horneado")
+    st.title("🧠 IA Predictiva de Horneado (Con Calendario)")
     
-    st.info("💡 El modelo de Random Forest está analizando la estacionalidad, tendencias y días de mes de tu historial...")
+    st.info("💡 El modelo de Random Forest está analizando estacionalidad, tendencias y festivos de Madrid...")
 
-    # Le ponemos un "spinner" para que veas que está pensando
-    @st.cache_data(ttl=3600, show_spinner="Entrenando árboles de decisión... esto puede tardar unos segundos ⏳")
+    @st.cache_data(ttl=3600, show_spinner="Entrenando IA y cruzando calendario de festivos... ⏳")
     def entrenar_ia():
         try:
-            # 1. Traemos ventas
+            import holidays
+            # Cargamos los festivos de España, provincia de Madrid para los últimos y próximos años
+            años_historial = [2022, 2023, 2024, 2025, 2026, 2027]
+            festivos_madrid = holidays.Spain(years=años_historial, prov='MAD')
+
+            # 1. Traemos ventas y productos
             res_v = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
-            if not res_v.data: 
-                return None, "⚠️ La tabla 'historial_ventas' está vacía. Necesitas subir el CSV primero."
+            if not res_v.data: return None, "⚠️ La tabla de historial está vacía."
             df_v = pd.DataFrame(res_v.data)
             
-            # 2. Traemos productos
             res_p = conn.table("productos").select("id, nombre").execute()
-            if not res_p.data: 
-                return None, "⚠️ No hay productos creados."
+            if not res_p.data: return None, "⚠️ No hay productos."
             df_p = pd.DataFrame(res_p.data)
             
-            # 3. Cruce de datos
+            # 2. Cruce de datos
             df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id', how='left')
             df['Producto'] = df['nombre'].fillna('Desconocido')
-            df['fecha'] = pd.to_datetime(df['fecha'])
+            df['fecha'] = pd.to_datetime(df['fecha']).dt.date # Nos aseguramos de que sea solo fecha (sin hora)
             
-            # 4. Agrupación y Feature Engineering
+            # 3. Agrupación por día
             df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
+            df_diario['fecha'] = pd.to_datetime(df_diario['fecha'])
+            
+            # 4. INGENIERÍA DE VARIABLES (FEATURE ENGINEERING) - AHORA CON FESTIVOS
             df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
             df_diario['Mes'] = df_diario['fecha'].dt.month
             df_diario['Año'] = df_diario['fecha'].dt.year
             
+            # MAGIA: Creamos columnas de Festivo y Víspera (1 si es cierto, 0 si no)
+            df_diario['Es_Festivo'] = df_diario['fecha'].apply(lambda x: 1 if x in festivos_madrid else 0)
+            df_diario['Es_Vispera'] = df_diario['fecha'].apply(lambda x: 1 if (x + pd.Timedelta(days=1)) in festivos_madrid else 0)
+            
+            # Variables de HOY para hacer la predicción
             fecha_hoy = pd.to_datetime(datetime.date.today())
             hoy_features = pd.DataFrame({
-                'Dia_Semana': [fecha_hoy.dayofweek], 'Dia_Mes': [fecha_hoy.day],
-                'Mes': [fecha_hoy.month], 'Año': [fecha_hoy.year]
+                'Dia_Semana': [fecha_hoy.dayofweek], 
+                'Dia_Mes': [fecha_hoy.day],
+                'Mes': [fecha_hoy.month], 
+                'Año': [fecha_hoy.year],
+                'Es_Festivo': [1 if fecha_hoy in festivos_madrid else 0],
+                'Es_Vispera': [1 if (fecha_hoy + pd.Timedelta(days=1)) in festivos_madrid else 0]
             })
 
-            # 5. Entrenamiento IA
+            # 5. Entrenamiento del Bosque Aleatorio
             predicciones = []
             for prod in df_diario['Producto'].unique():
                 if prod == 'Desconocido': continue
                 
                 datos_prod = df_diario[df_diario['Producto'] == prod]
-                if len(datos_prod) > 3: # Exigimos al menos 4 días de historial
-                    X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
+                if len(datos_prod) > 3: 
+                    # Ahora la IA entrena con 6 variables, no solo 4
+                    X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año', 'Es_Festivo', 'Es_Vispera']]
                     y = datos_prod['cantidad_vendida']
                     
                     modelo = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -246,18 +260,17 @@ elif st.session_state.pantalla == 'Dashboard':
             
             df_resultados = pd.DataFrame(predicciones)
             if df_resultados.empty:
-                return None, f"⚠️ Se leyeron {len(df_v)} ventas, pero ningún producto tiene más de 3 días de historial registrado."
+                return None, "⚠️ Se leyeron ventas, pero ningún producto tiene más de 3 días de historial."
                 
-            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ ¡Éxito! La IA se ha entrenado leyendo **{len(df_v)} registros** de ventas."
+            return df_resultados.sort_values(by="Previsión IA (Uds)", ascending=False), f"✅ IA entrenada con **{len(df_v)} registros**, cruzando datos con el calendario oficial de Madrid."
             
         except Exception as e:
             return None, f"❌ Error interno de la IA: {e}"
 
     # --- EJECUTAR Y MOSTRAR RESULTADOS ---
-    df_prev, mensaje_diagnostico = entrenar_ia()
+    df_prev, mensaje = entrenar_ia()
     
-    # EL CHIVATO: Te muestra exactamente qué ha pasado
-    st.write(mensaje_diagnostico)
+    st.write(mensaje)
     
     if df_prev is not None and not df_prev.empty:
         col_t, col_g = st.columns([1, 1.5])
@@ -269,10 +282,6 @@ elif st.session_state.pantalla == 'Dashboard':
             fig = px.bar(df_prev.head(15), x='Previsión IA (Uds)', y='Producto', orientation='h', color='Previsión IA (Uds)', color_continuous_scale='Reds')
             fig.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-#        (AQUÍ EMPIEZA LA PANTALLA: CARGA)
-# ==========================================
 
 # ==========================================
 #        PANTALLA: CARGA DE DATOS (MAPEO)
