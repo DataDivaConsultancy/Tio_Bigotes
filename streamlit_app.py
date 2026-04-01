@@ -10,7 +10,7 @@ import numpy as np
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Tío Bigotes Pro", layout="wide")
 
-# --- CONEXIÓN ROBUSTA (EVITA EL CONNECTIONREFUSED) ---
+# --- CONEXIÓN ROBUSTA ---
 try:
     conn = st.connection(
         "supabase",
@@ -64,9 +64,12 @@ elif st.session_state.pantalla == 'Empleados':
             nom = st.text_input("Nombre Completo")
             rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
             if st.form_submit_button("Guardar Empleado"):
-                conn.table("empleados").insert({"nombre": nom, "rol": rol}).execute()
-                st.success(f"Empleado '{nom}' dado de alta exitosamente.")
-                st.rerun()
+                try:
+                    conn.table("empleados").insert({"nombre": nom, "rol": rol}).execute()
+                    st.success(f"Empleado '{nom}' dado de alta exitosamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al guardar empleado (¿Creaste la tabla en Supabase?): {e}")
 
     st.subheader("Personal Actual")
     try:
@@ -76,7 +79,7 @@ elif st.session_state.pantalla == 'Empleados':
         else:
             st.info("No hay empleados activos.")
     except Exception as e:
-        st.error(f"Error al cargar empleados: {e}")
+        st.error("No se pudo cargar la lista de empleados. Asegúrate de crear la tabla 'empleados'.")
 
 # ==========================================
 #        PANTALLA: HOJA CONTROL DIARIO
@@ -89,9 +92,12 @@ elif st.session_state.pantalla == 'Operativa':
     col_f, col_e = st.columns(2)
     fecha_sel = col_f.date_input("Fecha de trabajo:", datetime.date.today())
     
-    res_emp = conn.table("empleados").select("id, nombre").eq("activo", True).execute()
-    emps = {e['nombre']: e['id'] for e in res_emp.data} if res_emp.data else {}
-    
+    try:
+        res_emp = conn.table("empleados").select("id, nombre").eq("activo", True).execute()
+        emps = {e['nombre']: e['id'] for e in res_emp.data} if res_emp.data else {}
+    except:
+        emps = {}
+        
     if not emps:
         st.error("⚠️ Debes dar de alta empleados en la sección correspondiente primero.")
         st.stop()
@@ -104,8 +110,14 @@ elif st.session_state.pantalla == 'Operativa':
     df_prod = pd.DataFrame(res_p.data)
 
     ayer = fecha_sel - datetime.timedelta(days=1)
-    res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
-    dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
+    
+    # ESCUDO ANTIFALLOS: Si la tabla control_diario no existe, no rompemos la app
+    dict_ayer = {}
+    try:
+        res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
+        dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
+    except Exception as e:
+        st.warning("⚠️ No se pudo cargar el stock de ayer (Posiblemente falte crear la tabla 'control_diario' en Supabase o el RLS está activo). Stock inicial a 0.")
 
     # 3. PREPARAR TABLA PARA EDITAR
     data_hoja = []
@@ -149,7 +161,6 @@ elif st.session_state.pantalla == 'Operativa':
             try:
                 lote = []
                 for _, row in edited_df.iterrows():
-                    # Guardamos si hay algún tipo de movimiento
                     if any([row["Stock Inicial"] > 0, row["Horneados"] > 0, row["Merma"] > 0, row["Resto (Cierre)"] > 0]):
                         lote.append({
                             "fecha": str(fecha_sel),
@@ -169,7 +180,7 @@ elif st.session_state.pantalla == 'Operativa':
                 else:
                     st.info("No se han detectado movimientos para guardar.")
             except Exception as e:
-                st.error(f"Error al guardar: {e}")
+                st.error(f"Error al guardar: {e}. Revisa si la tabla 'control_diario' existe.")
 
 # ==========================================
 #        PANTALLA: DASHBOARD & IA PREDICTIVA
@@ -182,10 +193,7 @@ elif st.session_state.pantalla == 'Dashboard':
 
     @st.cache_data(ttl=3600)
     def entrenar_ia():
-        # Extracción segura de datos históricos
         try:
-            # Nota: Supabase por defecto devuelve 1000 filas. Para modelos masivos, 
-            # se requerirá configurar paginación o una Vista SQL en el futuro.
             res = conn.table("historial_ventas").select("fecha, cantidad_vendida, productos(nombre)").limit(50000).execute()
             if not res.data: return None
             
@@ -193,7 +201,6 @@ elif st.session_state.pantalla == 'Dashboard':
             df['fecha'] = pd.to_datetime(df['fecha'])
             df['Producto'] = df['productos'].apply(lambda x: x['nombre'] if x else 'Desc.')
             
-            # Agrupación y Feature Engineering
             df_diario = df.groupby(['fecha', 'Producto'])['cantidad_vendida'].sum().reset_index()
             df_diario['Dia_Semana'] = df_diario['fecha'].dt.dayofweek
             df_diario['Dia_Mes'] = df_diario['fecha'].dt.day
@@ -209,11 +216,10 @@ elif st.session_state.pantalla == 'Dashboard':
             predicciones = []
             for prod in df_diario['Producto'].unique():
                 datos_prod = df_diario[df_diario['Producto'] == prod]
-                if len(datos_prod) > 10: # Mínimo de datos para entrenar
+                if len(datos_prod) > 10: 
                     X = datos_prod[['Dia_Semana', 'Dia_Mes', 'Mes', 'Año']]
                     y = datos_prod['cantidad_vendida']
                     
-                    # Entrenamiento del Bosque Aleatorio
                     modelo = RandomForestRegressor(n_estimators=100, random_state=42)
                     modelo.fit(X, y)
                     pred = modelo.predict(hoy_features)[0]
@@ -256,8 +262,11 @@ elif st.session_state.pantalla == 'Carga':
         df = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
         cabeceras = list(df.columns)
         
-        res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
-        m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
+        try:
+            res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
+            m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
+        except:
+            m_prev = {}
         
         st.subheader("⚙️ Configurar Columnas")
         campos_db = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago"]
@@ -274,7 +283,6 @@ elif st.session_state.pantalla == 'Carga':
 
         st.divider()
 
-        # Detección de productos nuevos
         nombres_csv = df[nuevo_mapeo['producto_id']].apply(limpiar_nombre).unique()
         res_p = conn.table("productos").select("id, nombre").execute()
         dict_db = {limpiar_nombre(p['nombre']): p['id'] for p in res_p.data}
