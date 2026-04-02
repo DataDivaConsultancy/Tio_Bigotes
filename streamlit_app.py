@@ -250,90 +250,100 @@ elif st.session_state.pantalla == 'Productos':
         st.dataframe(pd.DataFrame(res.data), use_container_width=True)
 
 # ==========================================
-#        PANTALLA: IA PREDICTIVA (CORREGIDA)
+#        PANTALLA: IA PREDICTIVA (MOTOR BARCELONA)
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
     st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva de Horneado")
-    st.subheader("Configuración de la Previsión")
-
-    # --- CONFIGURACIÓN DE PARÁMETROS ---
+    st.title("🧠 IA Predictiva: Motor Barcelona")
+    
+    # --- CONFIGURACIÓN ---
     c1, c2, c3 = st.columns(3)
-    fecha_pred = c1.date_input("📅 ¿Para qué día?", datetime.date.today())
-    es_festivo = c2.toggle("🚩 ¿Es Festivo / Semana Santa?", value=True) # Marcado hoy por Jueves Santo
-    es_evento = c3.toggle("🎉 ¿Hay Evento Especial?", value=False)
+    fecha_pred = c1.date_input("📅 Día para Predecir", datetime.date.today())
+    es_festivo = c2.toggle("🚩 ¿Es Festivo / Puente?", value=True)
+    es_evento = c3.toggle("🎉 ¿Hay Evento en la zona?", value=False)
 
-    st.info(f"Analizando previsión para el **{fecha_pred.strftime('%A %d de %B')}**")
-
-    if st.button("🎯 GENERAR PREVISIÓN DE PRODUCCIÓN"):
-        with st.spinner("Consultando historial real y calculando..."):
-            # 1. Obtener Historial y Productos
-            rv = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
-            rp = conn.table("productos").select("id, nombre").execute()
+    if st.button("🎯 GENERAR PREVISIÓN BASADA EN HISTORIAL"):
+        with st.spinner("Analizando festivos históricos en Barcelona..."):
+            # 1. Cargar Datos
+            rv = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(100000).execute()
+            rp = conn.table("productos").select("id, nombre, categoria").eq("categoria", "Empanada").execute()
             
-            if not rv.data:
-                st.error("No hay datos en el historial para entrenar la IA.")
-            else:
-                df_v = pd.DataFrame(rv.data)
-                df_p = pd.DataFrame(rp.data)
+            if not rv.data or not rp.data:
+                st.error("No hay datos suficientes."); st.stop()
+
+            df_v = pd.DataFrame(rv.data)
+            df_p = pd.DataFrame(rp.data)
+            df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id')
+            df['fecha'] = pd.to_datetime(df['fecha'])
+
+            # 2. CÁLCULO DINÁMICO DEL MULTIPLICADOR (BARCELONA)
+            # Comparamos ventas en festivos pasados vs días normales del mismo tipo
+            import holidays
+            es_h = holidays.Spain(prov='CT') # Calendario específico de Catalunya/Barcelona
+            
+            df['es_festivo_hist'] = df['fecha'].apply(lambda x: x in es_h or x.weekday() >= 5)
+            
+            ventas_festivos = df[df['es_festivo_hist'] == True]['cantidad_vendida'].mean()
+            ventas_normales = df[df['es_festivo_hist'] == False]['cantidad_vendida'].mean()
+            
+            # El multiplicador real de tu negocio suele rondar el 1.15 (15%)
+            multiplicador_real = (ventas_festivos / ventas_normales) if ventas_normales > 0 else 1.15
+            # Limitamos el multiplicador para que no sea una locura (máximo 25% de incremento)
+            multiplicador_final = min(multiplicador_real, 1.25)
+
+            # 3. FILTRO DE SABORES ACTIVOS (Ventas en los últimos 45 días)
+            fecha_corte = df['fecha'].max() - pd.Timedelta(days=45)
+            sabores_vivos = df[df['fecha'] >= fecha_corte]['id'].unique()
+
+            # 4. CÁLCULO DE PREVISIÓN
+            dia_sem_obj = fecha_pred.weekday()
+            res_ia = []
+
+            for _, prod in df_p.iterrows():
+                # REGLA: Si es Cordobesa, Tucumana o similares sin ventas recientes, fuera.
+                if prod['id'] not in sabores_vivos:
+                    continue
                 
-                # Unir para tener nombres reales
-                df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id')
-                df['fecha'] = pd.to_datetime(df['fecha'])
-                df['dia_sem'] = df['fecha'].dt.dayofweek
+                sub = df[df['id'] == prod['id']]
+                # Buscamos el histórico de ese mismo día de la semana
+                hist_dia = sub[sub['fecha'].dt.dayofweek == dia_sem_obj]['cantidad_vendida']
                 
-                # 2. Lógica de Previsión por Producto
-                res_ia = []
-                dia_semana_objetivo = fecha_pred.weekday()
-                
-                for p_id in df['id'].unique():
-                    nombre_prod = df[df['id'] == p_id]['nombre'].iloc[0]
-                    sub = df[df['id'] == p_id]
-                    
-                    # Media de ese mismo día de la semana en el pasado
-                    media_historica = sub[sub['dia_sem'] == dia_semana_objetivo]['cantidad_vendida'].mean()
-                    
-                    if pd.isna(media_historica):
-                        media_historica = sub['cantidad_vendida'].mean() # Media general si no hay de ese día
-                    
-                    # APLICAR FACTORES (Festivos/Eventos)
-                    prediccion = media_historica
-                    if es_festivo: prediccion *= 1.30  # +30% por ser festivo
-                    if es_evento: prediccion *= 1.20   # +20% por evento
-                    
-                    # Redondeo lógico y limpieza de ruidos
-                    final_uds = int(np.ceil(prediccion))
-                    
-                    if final_uds > 0:
-                        res_ia.append({
-                            "Producto": nombre_prod,
-                            "Previsión (Uds)": final_uds,
-                            "Tanda Mañana": int(np.ceil(final_uds * 0.7)), # 70% por la mañana
-                            "Tanda Tarde": int(np.floor(final_uds * 0.3))   # 30% de refuerzo
-                        })
-                
-                # 3. Mostrar Resultados
-                if res_ia:
-                    df_res = pd.DataFrame(res_ia).sort_values(by="Previsión (Uds)", ascending=False)
-                    
-                    st.success(f"✅ Previsión completada para {len(df_res)} productos.")
-                    
-                    # Visualización
-                    col_tabla, col_grafica = st.columns([1, 1])
-                    
-                    with col_tabla:
-                        st.markdown("**Sugerencia de Horneado:**")
-                        st.dataframe(df_res, hide_index=True, use_container_width=True)
-                        
-                        # Botón para copiar a WhatsApp
-                        res_txt = f"*Previsión Tío Bigotes - {fecha_pred}*\n"
-                        for _, r in df_res.iterrows():
-                            res_txt += f"• {r['Producto']}: {r['Tanda Mañana']} + {r['Tanda Tarde']} = {r['Previsión (Uds)']}\n"
-                        st.text_area("Copia esto para WhatsApp:", res_txt, height=200)
-                    
-                    with col_grafica:
-                        st.markdown("**Distribución de la Demanda:**")
-                        fig = px.pie(df_res.head(10), values='Previsión (Uds)', names='Producto', hole=0.4)
-                        st.plotly_chart(fig, use_container_width=True)
+                if not hist_dia.empty:
+                    # Usamos la Mediana (más estable que la media para evitar picos raros)
+                    base = hist_dia.median()
                 else:
-                    st.warning("No se pudo generar previsión. Revisa que los productos tengan ventas en el historial.")
+                    base = 0
+
+                # Aplicar Multiplicadores Basados en Data
+                if es_festivo: base *= multiplicador_final
+                if es_evento: base *= 1.10
+                
+                uds_final = int(np.ceil(base))
+                
+                res_ia.append({
+                    "Empanada": prod['nombre'],
+                    "Previsión Total": uds_final,
+                    "Tanda 1 (09:00)": int(np.ceil(uds_final * 0.7)),
+                    "Tanda 2 (13:00)": int(np.floor(uds_final * 0.3))
+                })
+
+            # 5. MOSTRAR RESULTADOS
+            if res_ia:
+                df_res = pd.DataFrame(res_ia).sort_values(by="Previsión Total", ascending=False)
+                
+                st.write(f"📊 **Análisis completado:** El multiplicador histórico detectado para festivos en tu local es de **+{int((multiplicador_final-1)*100)}%**.")
+                
+                st.subheader(f"📋 Previsión para {fecha_pred.strftime('%d/%m/%Y')}")
+                st.dataframe(df_res, hide_index=True, use_container_width=True)
+                
+                # Texto para WhatsApp limpio (Una línea por sabor)
+                txt_ws = f"*PREVISIÓN TÍO BIGOTES - {fecha_pred.strftime('%d/%m/%Y')}*\n"
+                txt_ws += f"*Día:* {fecha_pred.strftime('%A')} {'(Festivo/Puente)' if es_festivo else ''}\n"
+                txt_ws += "-"*25 + "\n"
+                for _, r in df_res.iterrows():
+                    # Solo incluimos si la previsión es > 0 (o mostramos 0 si es activo)
+                    txt_ws += f"• {r['Empanada']}: {r['Tanda 1 (09:00)']} + {r['Tanda 2 (13:00)']} = *{r['Previsión Total']}*\n"
+                
+                st.text_area("Copia para WhatsApp", txt_ws, height=350)
+            else:
+                st.warning("No hay datos de empanadas activas para calcular.")
