@@ -250,33 +250,90 @@ elif st.session_state.pantalla == 'Productos':
         st.dataframe(pd.DataFrame(res.data), use_container_width=True)
 
 # ==========================================
-#        PANTALLA: IA PREDICTIVA
+#        PANTALLA: IA PREDICTIVA (CORREGIDA)
 # ==========================================
 elif st.session_state.pantalla == 'Dashboard':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
+    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
     st.title("🧠 IA Predictiva de Horneado")
-    
-    f_ia = st.date_input("Fecha para predecir:", datetime.date.today())
-    if st.button("🎯 GENERAR PREVISIÓN"):
-        import holidays
-        es_h = holidays.Spain(years=[2022, 2023, 2024, 2025, 2026])
-        
-        rv = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(20000).execute()
-        if rv.data:
-            df_v = pd.DataFrame(rv.data)
-            df_v['fecha'] = pd.to_datetime(df_v['fecha'])
-            df_v['d_sem'] = df_v['fecha'].dt.dayofweek
-            df_v['festivo'] = df_v['fecha'].apply(lambda x: 1 if x in es_h else 0)
+    st.subheader("Configuración de la Previsión")
+
+    # --- CONFIGURACIÓN DE PARÁMETROS ---
+    c1, c2, c3 = st.columns(3)
+    fecha_pred = c1.date_input("📅 ¿Para qué día?", datetime.date.today())
+    es_festivo = c2.toggle("🚩 ¿Es Festivo / Semana Santa?", value=True) # Marcado hoy por Jueves Santo
+    es_evento = c3.toggle("🎉 ¿Hay Evento Especial?", value=False)
+
+    st.info(f"Analizando previsión para el **{fecha_pred.strftime('%A %d de %B')}**")
+
+    if st.button("🎯 GENERAR PREVISIÓN DE PRODUCCIÓN"):
+        with st.spinner("Consultando historial real y calculando..."):
+            # 1. Obtener Historial y Productos
+            rv = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(50000).execute()
+            rp = conn.table("productos").select("id, nombre").execute()
             
-            # Entrenamiento simplificado para rapidez
-            res_ia = []
-            for p_id in df_v['producto_id'].unique():
-                sub = df_v[df_v['producto_id'] == p_id]
-                if len(sub) > 5:
-                    X = sub[['d_sem', 'festivo']]
-                    y = sub['cantidad_vendida']
-                    m = RandomForestRegressor(n_estimators=50).fit(X, y)
-                    pred = m.predict([[f_ia.weekday(), 1 if f_ia in es_h else 0]])
-                    res_ia.append({"ID": p_id, "Sugerencia": int(pred[0])})
-            
-            st.table(pd.DataFrame(res_ia))
+            if not rv.data:
+                st.error("No hay datos en el historial para entrenar la IA.")
+            else:
+                df_v = pd.DataFrame(rv.data)
+                df_p = pd.DataFrame(rp.data)
+                
+                # Unir para tener nombres reales
+                df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id')
+                df['fecha'] = pd.to_datetime(df['fecha'])
+                df['dia_sem'] = df['fecha'].dt.dayofweek
+                
+                # 2. Lógica de Previsión por Producto
+                res_ia = []
+                dia_semana_objetivo = fecha_pred.weekday()
+                
+                for p_id in df['id'].unique():
+                    nombre_prod = df[df['id'] == p_id]['nombre'].iloc[0]
+                    sub = df[df['id'] == p_id]
+                    
+                    # Media de ese mismo día de la semana en el pasado
+                    media_historica = sub[sub['dia_sem'] == dia_semana_objetivo]['cantidad_vendida'].mean()
+                    
+                    if pd.isna(media_historica):
+                        media_historica = sub['cantidad_vendida'].mean() # Media general si no hay de ese día
+                    
+                    # APLICAR FACTORES (Festivos/Eventos)
+                    prediccion = media_historica
+                    if es_festivo: prediccion *= 1.30  # +30% por ser festivo
+                    if es_evento: prediccion *= 1.20   # +20% por evento
+                    
+                    # Redondeo lógico y limpieza de ruidos
+                    final_uds = int(np.ceil(prediccion))
+                    
+                    if final_uds > 0:
+                        res_ia.append({
+                            "Producto": nombre_prod,
+                            "Previsión (Uds)": final_uds,
+                            "Tanda Mañana": int(np.ceil(final_uds * 0.7)), # 70% por la mañana
+                            "Tanda Tarde": int(np.floor(final_uds * 0.3))   # 30% de refuerzo
+                        })
+                
+                # 3. Mostrar Resultados
+                if res_ia:
+                    df_res = pd.DataFrame(res_ia).sort_values(by="Previsión (Uds)", ascending=False)
+                    
+                    st.success(f"✅ Previsión completada para {len(df_res)} productos.")
+                    
+                    # Visualización
+                    col_tabla, col_grafica = st.columns([1, 1])
+                    
+                    with col_tabla:
+                        st.markdown("**Sugerencia de Horneado:**")
+                        st.dataframe(df_res, hide_index=True, use_container_width=True)
+                        
+                        # Botón para copiar a WhatsApp
+                        res_txt = f"*Previsión Tío Bigotes - {fecha_pred}*\n"
+                        for _, r in df_res.iterrows():
+                            res_txt += f"• {r['Producto']}: {r['Tanda Mañana']} + {r['Tanda Tarde']} = {r['Previsión (Uds)']}\n"
+                        st.text_area("Copia esto para WhatsApp:", res_txt, height=200)
+                    
+                    with col_grafica:
+                        st.markdown("**Distribución de la Demanda:**")
+                        fig = px.pie(df_res.head(10), values='Previsión (Uds)', names='Producto', hole=0.4)
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No se pudo generar previsión. Revisa que los productos tengan ventas en el historial.")
