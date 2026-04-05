@@ -499,10 +499,14 @@ elif st.session_state.pantalla == "Empleados":
             c2.write(f"{row['rol']} | {'Activo' if row['activo'] else 'Inactivo'}")
             if row["activo"]:
                 if c3.button("Baja", key=f"baja_emp_{row['id']}"):
-                    conn.table("empleados_v2").update({
-                        "activo": False,
-                        "fecha_baja": str(datetime.date.today())
-                    }).eq("id", int(row["id"])).execute()
+                    conn.query(
+    "select * from rpc_baja_empleado(:id, :fecha_baja);",
+    params={
+        "id": int(row["id"]),
+        "fecha_baja": str(datetime.date.today())
+    },
+    ttl=0
+)
                     clear_cache()
                     st.rerun()
 
