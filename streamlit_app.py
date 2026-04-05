@@ -1,16 +1,17 @@
-import streamlit as st
-import pandas as pd
-from st_supabase_connection import SupabaseConnection, execute_query
 import datetime
+import csv
+import hashlib
+import io
 import re
 import unicodedata
-import plotly.express as px
-import numpy as np
-import requests
-import csv
-import io
-import hashlib
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import requests
+import streamlit as st
+from st_supabase_connection import SupabaseConnection
 
 
 # =========================================================
@@ -20,10 +21,11 @@ import hashlib
 st.set_page_config(
     page_title="Tío Bigotes Pro",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 div.stButton > button:first-child {
     height: 88px;
@@ -44,7 +46,9 @@ div.stButton > button:first-child:hover {
     padding-top: 1.1rem;
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # =========================================================
@@ -56,7 +60,7 @@ try:
         "supabase",
         type=SupabaseConnection,
         url=st.secrets["connections"]["supabase"]["url"],
-        key=st.secrets["connections"]["supabase"]["key"]
+        key=st.secrets["connections"]["supabase"]["key"],
     )
 except Exception as e:
     st.error(f"Error de conexión a Supabase: {e}")
@@ -67,30 +71,35 @@ except Exception as e:
 # HELPERS
 # =========================================================
 
+
 def normalizar_nombre_py(t: str) -> str:
     t = unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode("utf-8")
     t = t.upper().strip()
-    t = re.sub(r'^\d+[\.\-\s]*', '', t)
-    t = re.sub(r'\s+', ' ', t)
-    t = re.sub(r'\.+$', '', t)
+    t = re.sub(r"^\d+[\.\-\s]*", "", t)
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\.+$", "", t)
     return t.strip()
 
 
-def df_from_res(res) -> pd.DataFrame:
+
+def df_from_res(res: Any) -> pd.DataFrame:
     return pd.DataFrame(res.data) if getattr(res, "data", None) else pd.DataFrame()
 
 
-def clear_cache():
+
+def clear_cache() -> None:
     st.cache_data.clear()
 
 
-def safe_bool(v) -> bool:
+
+def safe_bool(v: Any) -> bool:
     if pd.isna(v):
         return False
     return bool(v)
 
 
-def safe_int(v, default=0) -> int:
+
+def safe_int(v: Any, default: int = 0) -> int:
     try:
         if pd.isna(v):
             return default
@@ -99,7 +108,8 @@ def safe_int(v, default=0) -> int:
         return default
 
 
-def safe_float(v, default=0.0) -> float:
+
+def safe_float(v: Any, default: float = 0.0) -> float:
     try:
         if pd.isna(v):
             return default
@@ -108,7 +118,8 @@ def safe_float(v, default=0.0) -> float:
         return default
 
 
-def safe_date_iso(v):
+
+def safe_date_iso(v: Any) -> Optional[str]:
     try:
         if pd.isna(v):
             return None
@@ -117,225 +128,8 @@ def safe_date_iso(v):
         return None
 
 
-def rpc_call(name: str, params: dict | None = None):
-    def detectar_csv(file_bytes: bytes):
-    encoding = "utf-8-sig"
-    text = None
 
-    for enc in ["utf-8-sig", "utf-8", "latin-1"]:
-        try:
-            text = file_bytes.decode(enc)
-            encoding = enc
-            break
-        except Exception:
-            continue
-
-    if text is None:
-        raise ValueError("No pude decodificar el archivo CSV.")
-
-    muestra = text[:5000]
-    try:
-        dialect = csv.Sniffer().sniff(muestra, delimiters=";,|\t,")
-        sep = dialect.delimiter
-    except Exception:
-        sep = ";"
-
-    return text, encoding, sep
-
-
-def leer_csv_preview(file_bytes: bytes, nrows=200):
-    text, encoding, sep = detectar_csv(file_bytes)
-    df = pd.read_csv(io.StringIO(text), sep=sep, nrows=nrows)
-    return df, encoding, sep
-
-
-def iter_csv_chunks(file_bytes: bytes, sep: str, encoding: str, chunksize=20000):
-    text = file_bytes.decode(encoding)
-    buffer = io.StringIO(text)
-    for chunk in pd.read_csv(buffer, sep=sep, chunksize=chunksize):
-        yield chunk
-
-
-def cargar_mapeo_guardado():
-    res = conn.table("config_importaciones_v2").select("*").eq("import_type", "ventas_diarias").execute()
-    df = df_from_res(res)
-    if df.empty:
-        return {}, None, None
-
-    row = df.iloc[0]
-    mapping = row["mapping"] if isinstance(row["mapping"], dict) else {}
-    return mapping, row.get("separator"), row.get("encoding")
-
-
-def rpc_scalar(resp, key=None):
-    if isinstance(resp, list):
-        if not resp:
-            return None
-        if key and isinstance(resp[0], dict) and key in resp[0]:
-            return resp[0][key]
-        return resp[0]
-    if isinstance(resp, dict):
-        if key and key in resp:
-            return resp[key]
-        return resp
-    return resp
-
-
-def fetch_existing_by_ticket_uids(ticket_uids):
-    if not ticket_uids:
-        return {}
-
-    out = {}
-    lote = 500
-
-    for i in range(0, len(ticket_uids), lote):
-        sub = ticket_uids[i:i+lote]
-        resp = rpc_call("rpc_fetch_existing_sales_for_tickets", {
-            "p_ticket_uids": sub
-        })
-
-        if isinstance(resp, list):
-            for r in resp:
-                out[r["line_uid"]] = {
-                    "id": r["id"],
-                    "payload_hash": r["payload_hash"]
-                }
-
-    return out
-
-
-def prepare_rows_chunk(df_chunk, mapping, file_name, start_row_num, ticket_state):
-    def val(row, key, default=""):
-        src = mapping.get(key)
-        if not src or src not in row.index:
-            return default
-        v = row[src]
-        if pd.isna(v):
-            return default
-        return str(v).strip()
-
-    rows = []
-    row_num = start_row_num
-
-    for _, row in df_chunk.iterrows():
-        row_num += 1
-
-        fecha_raw = val(row, "fecha")
-        hora_raw = val(row, "hora")
-        serie_numero_raw = val(row, "serie_numero")
-        establecimiento_raw = val(row, "establecimiento")
-        caja_raw = val(row, "caja")
-        numero_raw = val(row, "numero")
-        cliente_raw = val(row, "cliente")
-        empleado_raw = val(row, "empleado")
-        uds_v_raw = val(row, "uds_v")
-        articulo_raw = val(row, "articulo")
-        subarticulo_raw = val(row, "subarticulo")
-        base_raw = val(row, "base")
-        impuestos_raw = val(row, "impuestos")
-        dto_total_raw = val(row, "dto_total")
-        neto_raw = val(row, "neto")
-        column1 = val(row, "column1")
-
-        ticket_uid_raw = " | ".join([
-            fecha_raw,
-            establecimiento_raw,
-            caja_raw,
-            serie_numero_raw
-        ])
-
-        line_idx = ticket_state.get(ticket_uid_raw, 0) + 1
-        ticket_state[ticket_uid_raw] = line_idx
-
-        line_uid = hashlib.md5(f"{ticket_uid_raw}|{line_idx}".encode("utf-8")).hexdigest()
-
-        payload_string = "|".join([
-            hora_raw,
-            numero_raw,
-            cliente_raw,
-            empleado_raw,
-            articulo_raw,
-            subarticulo_raw,
-            uds_v_raw,
-            base_raw,
-            impuestos_raw,
-            dto_total_raw,
-            neto_raw
-        ])
-        payload_hash = hashlib.md5(payload_string.encode("utf-8")).hexdigest()
-
-        rows.append({
-            "existing_id": None,
-            "source_file_name": file_name,
-            "source_row_num": row_num,
-            "row_num": row_num,
-            "column1": column1,
-            "fecha_raw": fecha_raw,
-            "hora_raw": hora_raw,
-            "serie_numero_raw": serie_numero_raw,
-            "establecimiento_raw": establecimiento_raw,
-            "caja_raw": caja_raw,
-            "numero_raw": numero_raw,
-            "cliente_raw": cliente_raw,
-            "empleado_raw": empleado_raw,
-            "uds_v_raw": uds_v_raw,
-            "articulo_raw": articulo_raw,
-            "subarticulo_raw": subarticulo_raw,
-            "base_raw": base_raw,
-            "impuestos_raw": impuestos_raw,
-            "dto_total_raw": dto_total_raw,
-            "neto_raw": neto_raw,
-            "ticket_uid_raw": ticket_uid_raw,
-            "line_idx_in_ticket": line_idx,
-            "line_uid": line_uid,
-            "payload_hash": payload_hash,
-        })
-
-    return rows, row_num, ticket_state
-
-
-def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping: dict, file_name: str):
-    total_fisicas = 0
-    total_unicas = 0
-    total_nuevas = 0
-    total_modificadas = 0
-    total_iguales = 0
-
-    ticket_state = {}
-    current_row_num = 0
-
-    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=20000):
-        total_fisicas += len(chunk)
-
-        rows, current_row_num, ticket_state = prepare_rows_chunk(
-            chunk, mapping, file_name, current_row_num, ticket_state
-        )
-
-        if not rows:
-            continue
-
-        df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
-        total_unicas += len(df_rows)
-
-        existing_map = fetch_existing_by_ticket_uids(df_rows["ticket_uid_raw"].drop_duplicates().tolist())
-
-        for _, r in df_rows.iterrows():
-            old = existing_map.get(r["line_uid"])
-            if old is None:
-                total_nuevas += 1
-            elif old["payload_hash"] != r["payload_hash"]:
-                total_modificadas += 1
-            else:
-                total_iguales += 1
-
-    return {
-        "total_fisicas": total_fisicas,
-        "total_unicas": total_unicas,
-        "nuevas": total_nuevas,
-        "modificadas": total_modificadas,
-        "iguales": total_iguales,
-        "a_subir": total_nuevas + total_modificadas
-    }
+def rpc_call(name: str, params: Optional[Dict[str, Any]] = None) -> Any:
     """
     Llama a una función Postgres expuesta por Supabase vía REST:
     POST /rest/v1/rpc/<function_name>
@@ -365,13 +159,14 @@ def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping
             detail = response.text
         raise RuntimeError(f"RPC {name} falló: {detail}")
 
-    # Algunas RPC devuelven filas, otras null/void
     try:
         return response.json()
     except Exception:
         return None
 
-def detectar_csv(file_bytes: bytes):
+
+
+def detectar_csv(file_bytes: bytes) -> Tuple[str, str, str]:
     encoding = "utf-8-sig"
     text = None
 
@@ -396,20 +191,25 @@ def detectar_csv(file_bytes: bytes):
     return text, encoding, sep
 
 
-def leer_csv_preview(file_bytes: bytes, nrows=200):
+
+def leer_csv_preview(file_bytes: bytes, nrows: int = 200) -> Tuple[pd.DataFrame, str, str]:
     text, encoding, sep = detectar_csv(file_bytes)
     df = pd.read_csv(io.StringIO(text), sep=sep, nrows=nrows)
     return df, encoding, sep
 
 
-def iter_csv_chunks(file_bytes: bytes, sep: str, encoding: str, chunksize=20000):
+
+def iter_csv_chunks(
+    file_bytes: bytes, sep: str, encoding: str, chunksize: int = 20000
+) -> Iterator[pd.DataFrame]:
     text = file_bytes.decode(encoding)
     buffer = io.StringIO(text)
     for chunk in pd.read_csv(buffer, sep=sep, chunksize=chunksize):
         yield chunk
 
 
-def cargar_mapeo_guardado():
+
+def cargar_mapeo_guardado() -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
     res = conn.table("config_importaciones_v2").select("*").eq("import_type", "ventas_diarias").execute()
     df = df_from_res(res)
     if df.empty:
@@ -420,7 +220,8 @@ def cargar_mapeo_guardado():
     return mapping, row.get("separator"), row.get("encoding")
 
 
-def rpc_scalar(resp, key=None):
+
+def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
     if isinstance(resp, list):
         if not resp:
             return None
@@ -434,31 +235,37 @@ def rpc_scalar(resp, key=None):
     return resp
 
 
-def fetch_existing_by_ticket_uids(ticket_uids):
+
+def fetch_existing_by_ticket_uids(ticket_uids: List[str]) -> Dict[str, Dict[str, Any]]:
     if not ticket_uids:
         return {}
 
-    out = {}
+    out: Dict[str, Dict[str, Any]] = {}
     lote = 500
 
     for i in range(0, len(ticket_uids), lote):
-        sub = ticket_uids[i:i+lote]
-        resp = rpc_call("rpc_fetch_existing_sales_for_tickets", {
-            "p_ticket_uids": sub
-        })
+        sub = ticket_uids[i : i + lote]
+        resp = rpc_call("rpc_fetch_existing_sales_for_tickets", {"p_ticket_uids": sub})
 
         if isinstance(resp, list):
             for r in resp:
                 out[r["line_uid"]] = {
                     "id": r["id"],
-                    "payload_hash": r["payload_hash"]
+                    "payload_hash": r["payload_hash"],
                 }
 
     return out
 
 
-def prepare_rows_chunk(df_chunk, mapping, file_name, start_row_num, ticket_state):
-    def val(row, key, default=""):
+
+def prepare_rows_chunk(
+    df_chunk: pd.DataFrame,
+    mapping: Dict[str, str],
+    file_name: str,
+    start_row_num: int,
+    ticket_state: Dict[str, int],
+) -> Tuple[List[Dict[str, Any]], int, Dict[str, int]]:
+    def val(row: pd.Series, key: str, default: str = "") -> str:
         src = mapping.get(key)
         if not src or src not in row.index:
             return default
@@ -467,7 +274,7 @@ def prepare_rows_chunk(df_chunk, mapping, file_name, start_row_num, ticket_state
             return default
         return str(v).strip()
 
-    rows = []
+    rows: List[Dict[str, Any]] = []
     row_num = start_row_num
 
     for _, row in df_chunk.iterrows():
@@ -490,71 +297,79 @@ def prepare_rows_chunk(df_chunk, mapping, file_name, start_row_num, ticket_state
         neto_raw = val(row, "neto")
         column1 = val(row, "column1")
 
-        ticket_uid_raw = " | ".join([
-            fecha_raw,
-            establecimiento_raw,
-            caja_raw,
-            serie_numero_raw
-        ])
+        ticket_uid_raw = " | ".join(
+            [fecha_raw, establecimiento_raw, caja_raw, serie_numero_raw]
+        )
 
         line_idx = ticket_state.get(ticket_uid_raw, 0) + 1
         ticket_state[ticket_uid_raw] = line_idx
 
         line_uid = hashlib.md5(f"{ticket_uid_raw}|{line_idx}".encode("utf-8")).hexdigest()
 
-        payload_string = "|".join([
-            hora_raw,
-            numero_raw,
-            cliente_raw,
-            empleado_raw,
-            articulo_raw,
-            subarticulo_raw,
-            uds_v_raw,
-            base_raw,
-            impuestos_raw,
-            dto_total_raw,
-            neto_raw
-        ])
+        payload_string = "|".join(
+            [
+                hora_raw,
+                numero_raw,
+                cliente_raw,
+                empleado_raw,
+                articulo_raw,
+                subarticulo_raw,
+                uds_v_raw,
+                base_raw,
+                impuestos_raw,
+                dto_total_raw,
+                neto_raw,
+            ]
+        )
         payload_hash = hashlib.md5(payload_string.encode("utf-8")).hexdigest()
 
-        rows.append({
-            "existing_id": None,
-            "source_file_name": file_name,
-            "source_row_num": row_num,
-            "row_num": row_num,
-            "column1": column1,
-            "fecha_raw": fecha_raw,
-            "hora_raw": hora_raw,
-            "serie_numero_raw": serie_numero_raw,
-            "establecimiento_raw": establecimiento_raw,
-            "caja_raw": caja_raw,
-            "numero_raw": numero_raw,
-            "cliente_raw": cliente_raw,
-            "empleado_raw": empleado_raw,
-            "uds_v_raw": uds_v_raw,
-            "articulo_raw": articulo_raw,
-            "subarticulo_raw": subarticulo_raw,
-            "base_raw": base_raw,
-            "impuestos_raw": impuestos_raw,
-            "dto_total_raw": dto_total_raw,
-            "neto_raw": neto_raw,
-            "ticket_uid_raw": ticket_uid_raw,
-            "line_idx_in_ticket": line_idx,
-            "line_uid": line_uid,
-            "payload_hash": payload_hash,
-        })
+        rows.append(
+            {
+                "existing_id": None,
+                "source_file_name": file_name,
+                "source_row_num": row_num,
+                "row_num": row_num,
+                "column1": column1,
+                "fecha_raw": fecha_raw,
+                "hora_raw": hora_raw,
+                "serie_numero_raw": serie_numero_raw,
+                "establecimiento_raw": establecimiento_raw,
+                "caja_raw": caja_raw,
+                "numero_raw": numero_raw,
+                "cliente_raw": cliente_raw,
+                "empleado_raw": empleado_raw,
+                "uds_v_raw": uds_v_raw,
+                "articulo_raw": articulo_raw,
+                "subarticulo_raw": subarticulo_raw,
+                "base_raw": base_raw,
+                "impuestos_raw": impuestos_raw,
+                "dto_total_raw": dto_total_raw,
+                "neto_raw": neto_raw,
+                "ticket_uid_raw": ticket_uid_raw,
+                "line_idx_in_ticket": line_idx,
+                "line_uid": line_uid,
+                "payload_hash": payload_hash,
+            }
+        )
 
     return rows, row_num, ticket_state
 
 
-def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping: dict, file_name: str):
+
+def analizar_csv_incremental(
+    file_bytes: bytes,
+    sep: str,
+    encoding: str,
+    mapping: Dict[str, str],
+    file_name: str,
+) -> Dict[str, int]:
     total_fisicas = 0
     total_unicas = 0
     total_nuevas = 0
     total_modificadas = 0
     total_iguales = 0
 
-    ticket_state = {}
+    ticket_state: Dict[str, int] = {}
     current_row_num = 0
 
     for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=20000):
@@ -570,7 +385,9 @@ def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping
         df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
         total_unicas += len(df_rows)
 
-        existing_map = fetch_existing_by_ticket_uids(df_rows["ticket_uid_raw"].drop_duplicates().tolist())
+        existing_map = fetch_existing_by_ticket_uids(
+            df_rows["ticket_uid_raw"].drop_duplicates().tolist()
+        )
 
         for _, r in df_rows.iterrows():
             old = existing_map.get(r["line_uid"])
@@ -587,12 +404,23 @@ def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping
         "nuevas": total_nuevas,
         "modificadas": total_modificadas,
         "iguales": total_iguales,
-        "a_subir": total_nuevas + total_modificadas
+        "a_subir": total_nuevas + total_modificadas,
     }
 
 
+
+def reset_analisis_csv_si_cambia_archivo(file_bytes: bytes, file_name: str) -> None:
+    file_sig = hashlib.md5(file_bytes).hexdigest()
+    current_sig = f"{file_name}|{file_sig}"
+    previous_sig = st.session_state.get("csv_upload_signature")
+
+    if previous_sig != current_sig:
+        st.session_state["csv_upload_signature"] = current_sig
+        st.session_state.pop("analisis_subida_ventas", None)
+
+
 @st.cache_data(ttl=60)
-def cargar_local_id():
+def cargar_local_id() -> Optional[int]:
     res = conn.table("locales_v2").select("*").eq("codigo", "DIP159").execute()
     df = df_from_res(res)
     if df.empty:
@@ -607,9 +435,18 @@ def cargar_dim_productos() -> pd.DataFrame:
 
     if not df.empty:
         if "orden_visual" in df.columns:
-            df["orden_visual"] = pd.to_numeric(df["orden_visual"], errors="coerce").fillna(100).astype(int)
+            df["orden_visual"] = (
+                pd.to_numeric(df["orden_visual"], errors="coerce").fillna(100).astype(int)
+            )
 
-        for col in ["activo", "es_vendible", "es_producible", "afecta_forecast", "visible_en_control_diario", "visible_en_forecast"]:
+        for col in [
+            "activo",
+            "es_vendible",
+            "es_producible",
+            "afecta_forecast",
+            "visible_en_control_diario",
+            "visible_en_forecast",
+        ]:
             if col in df.columns:
                 df[col] = df[col].fillna(False).astype(bool)
 
@@ -617,13 +454,26 @@ def cargar_dim_productos() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60)
-def cargar_empleados_activos() -> pd.DataFrame:
-    res = conn.table("empleados_v2").select("*").eq("activo", True).execute()
+def cargar_empleados_activos(local_id: int) -> pd.DataFrame:
+    res = (
+        conn.table("empleados_v2")
+        .select("*")
+        .eq("activo", True)
+        .eq("local_id", local_id)
+        .execute()
+    )
     return df_from_res(res)
 
 
-def fetch_paginated(table_name, columns="*", filters=None, order_by="id", page_size=5000) -> pd.DataFrame:
-    rows = []
+
+def fetch_paginated(
+    table_name: str,
+    columns: str = "*",
+    filters: Optional[List[Dict[str, Any]]] = None,
+    order_by: str = "id",
+    page_size: int = 5000,
+) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
     offset = 0
 
     while True:
@@ -659,13 +509,14 @@ def fetch_paginated(table_name, columns="*", filters=None, order_by="id", page_s
     return pd.DataFrame(rows)
 
 
+
 def filtros_categoria_producto(
     df_dim: pd.DataFrame,
     key_prefix: str,
-    solo_activos=True,
-    solo_control=False,
-    solo_forecast=False
-):
+    solo_activos: bool = True,
+    solo_control: bool = False,
+    solo_forecast: bool = False,
+) -> Tuple[List[str], List[str]]:
     df = df_dim.copy()
 
     if solo_activos and "activo" in df.columns:
@@ -683,7 +534,7 @@ def filtros_categoria_producto(
         "Categoría",
         categorias,
         default=categorias,
-        key=f"{key_prefix}_categorias"
+        key=f"{key_prefix}_categorias",
     )
 
     if categorias_sel:
@@ -697,22 +548,35 @@ def filtros_categoria_producto(
         "Producto",
         productos,
         default=[],
-        key=f"{key_prefix}_productos"
+        key=f"{key_prefix}_productos",
     )
 
     return categorias_sel, productos_sel
 
 
-def aplicar_filtros_df(df: pd.DataFrame, df_dim: pd.DataFrame, categorias_sel, productos_sel) -> pd.DataFrame:
+
+def aplicar_filtros_df(
+    df: pd.DataFrame,
+    df_dim: pd.DataFrame,
+    categorias_sel: List[str],
+    productos_sel: List[str],
+) -> pd.DataFrame:
     if df.empty:
         return df
 
     dim_cols = [
-        "producto_id", "producto_nombre", "categoria_nombre",
-        "activo", "es_producible", "afecta_forecast",
-        "visible_en_control_diario", "visible_en_forecast",
-        "orden_visual", "uds_equivalentes_empanadas",
-        "fecha_inicio_venta", "fecha_fin_venta"
+        "producto_id",
+        "producto_nombre",
+        "categoria_nombre",
+        "activo",
+        "es_producible",
+        "afecta_forecast",
+        "visible_en_control_diario",
+        "visible_en_forecast",
+        "orden_visual",
+        "uds_equivalentes_empanadas",
+        "fecha_inicio_venta",
+        "fecha_fin_venta",
     ]
     dim_cols = [c for c in dim_cols if c in df_dim.columns]
 
@@ -727,16 +591,22 @@ def aplicar_filtros_df(df: pd.DataFrame, df_dim: pd.DataFrame, categorias_sel, p
     return out
 
 
-def cargar_ventas_rango(fecha_ini: datetime.date, fecha_fin: datetime.date) -> pd.DataFrame:
+
+def cargar_ventas_rango(
+    fecha_ini: datetime.date,
+    fecha_fin: datetime.date,
+    local_id: int,
+) -> pd.DataFrame:
     df = fetch_paginated(
         "ventas_staging_v2",
-        columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
+        columns="id,batch_id,raw_id,row_num,local_id,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
         filters=[
+            {"op": "eq", "col": "local_id", "val": local_id},
             {"op": "gte", "col": "fecha", "val": str(fecha_ini)},
             {"op": "lte", "col": "fecha", "val": str(fecha_fin)},
         ],
         order_by="fecha",
-        page_size=10000
+        page_size=10000,
     )
 
     if not df.empty:
@@ -750,6 +620,7 @@ def cargar_ventas_rango(fecha_ini: datetime.date, fecha_fin: datetime.date) -> p
     return df
 
 
+
 def cargar_control_diario(fecha_sel: datetime.date, local_id: int) -> pd.DataFrame:
     return fetch_paginated(
         "control_diario_v2",
@@ -759,8 +630,9 @@ def cargar_control_diario(fecha_sel: datetime.date, local_id: int) -> pd.DataFra
             {"op": "eq", "col": "fecha", "val": str(fecha_sel)},
         ],
         order_by="producto_id",
-        page_size=1000
+        page_size=1000,
     )
+
 
 
 def cargar_control_ayer(fecha_ayer: datetime.date, local_id: int) -> pd.DataFrame:
@@ -772,8 +644,9 @@ def cargar_control_ayer(fecha_ayer: datetime.date, local_id: int) -> pd.DataFram
             {"op": "eq", "col": "fecha", "val": str(fecha_ayer)},
         ],
         order_by="producto_id",
-        page_size=1000
+        page_size=1000,
     )
+
 
 
 def cargar_hornadas_fecha(fecha_sel: datetime.date, local_id: int) -> pd.DataFrame:
@@ -785,26 +658,30 @@ def cargar_hornadas_fecha(fecha_sel: datetime.date, local_id: int) -> pd.DataFra
             {"op": "eq", "col": "fecha", "val": str(fecha_sel)},
         ],
         order_by="id",
-        page_size=1000
+        page_size=1000,
     )
 
 
-def guardar_control_diario(payloads):
+
+def guardar_control_diario(payloads: List[Dict[str, Any]]) -> None:
     if not payloads:
         return
 
     for p in payloads:
-        rpc_call("rpc_upsert_control_diario", {
-            "p_local_id": p["local_id"],
-            "p_fecha": p["fecha"],
-            "p_producto_id": p["producto_id"],
-            "p_empleado_id": p["empleado_id"],
-            "p_stock_inicial": p["stock_inicial"],
-            "p_horneados": p["horneados"],
-            "p_merma": p["merma"],
-            "p_resto": p["resto"],
-            "p_incidencias": p["incidencias"]
-        })
+        rpc_call(
+            "rpc_upsert_control_diario",
+            {
+                "p_local_id": p["local_id"],
+                "p_fecha": p["fecha"],
+                "p_producto_id": p["producto_id"],
+                "p_empleado_id": p["empleado_id"],
+                "p_stock_inicial": p["stock_inicial"],
+                "p_horneados": p["horneados"],
+                "p_merma": p["merma"],
+                "p_resto": p["resto"],
+                "p_incidencias": p["incidencias"],
+            },
+        )
 
 
 # =========================================================
@@ -815,7 +692,8 @@ if "pantalla" not in st.session_state:
     st.session_state.pantalla = "Home"
 
 
-def ir_a(p):
+
+def ir_a(p: str) -> None:
     st.session_state.pantalla = p
 
 
@@ -859,9 +737,8 @@ if st.session_state.pantalla == "Home":
             ir_a("Forecast")
         if st.button("🧩 PENDIENTES"):
             ir_a("Pendientes")
-            
-            if st.button("📥 SUBIR CSV VENTAS"):
-    ir_a("CargaVentas")
+        if st.button("📥 SUBIR CSV VENTAS"):
+            ir_a("CargaVentas")
 
 
 # =========================================================
@@ -913,7 +790,7 @@ elif st.session_state.pantalla == "Productos":
         "uds_equivalentes_empanadas",
         "fecha_inicio_venta",
         "fecha_fin_venta",
-        "observaciones"
+        "observaciones",
     ]
 
     df_edit = df_view[columnas_editor].copy()
@@ -936,26 +813,33 @@ elif st.session_state.pantalla == "Productos":
             "uds_equivalentes_empanadas": st.column_config.NumberColumn("Eq. Emp", step=1),
             "fecha_inicio_venta": st.column_config.DateColumn("Inicio venta"),
             "fecha_fin_venta": st.column_config.DateColumn("Fin venta"),
-            "observaciones": st.column_config.TextColumn("Observaciones")
-        }
+            "observaciones": st.column_config.TextColumn("Observaciones"),
+        },
     )
 
     if st.button("💾 Guardar cambios de productos"):
         try:
             for _, row in editado.iterrows():
-                rpc_call("rpc_actualizar_producto", {
-                    "p_id": int(row["producto_id"]),
-                    "p_activo": safe_bool(row["activo"]),
-                    "p_es_producible": safe_bool(row["es_producible"]),
-                    "p_afecta_forecast": safe_bool(row["afecta_forecast"]),
-                    "p_visible_en_control_diario": safe_bool(row["visible_en_control_diario"]),
-                    "p_visible_en_forecast": safe_bool(row["visible_en_forecast"]),
-                    "p_orden_visual": safe_int(row["orden_visual"], 100),
-                    "p_uds_equivalentes_empanadas": safe_float(row["uds_equivalentes_empanadas"], 0),
-                    "p_fecha_inicio_venta": safe_date_iso(row["fecha_inicio_venta"]),
-                    "p_fecha_fin_venta": safe_date_iso(row["fecha_fin_venta"]),
-                    "p_observaciones": row["observaciones"] if pd.notnull(row["observaciones"]) else None
-                })
+                rpc_call(
+                    "rpc_actualizar_producto",
+                    {
+                        "p_id": int(row["producto_id"]),
+                        "p_activo": safe_bool(row["activo"]),
+                        "p_es_producible": safe_bool(row["es_producible"]),
+                        "p_afecta_forecast": safe_bool(row["afecta_forecast"]),
+                        "p_visible_en_control_diario": safe_bool(row["visible_en_control_diario"]),
+                        "p_visible_en_forecast": safe_bool(row["visible_en_forecast"]),
+                        "p_orden_visual": safe_int(row["orden_visual"], 100),
+                        "p_uds_equivalentes_empanadas": safe_float(
+                            row["uds_equivalentes_empanadas"], 0
+                        ),
+                        "p_fecha_inicio_venta": safe_date_iso(row["fecha_inicio_venta"]),
+                        "p_fecha_fin_venta": safe_date_iso(row["fecha_fin_venta"]),
+                        "p_observaciones": row["observaciones"]
+                        if pd.notnull(row["observaciones"])
+                        else None,
+                    },
+                )
 
             clear_cache()
             st.success("✅ Productos actualizados")
@@ -979,7 +863,9 @@ elif st.session_state.pantalla == "Productos":
                 visible_control_nuevo = st.checkbox("Visible en control diario", value=False)
                 visible_forecast_nuevo = st.checkbox("Visible en forecast", value=False)
                 orden_nuevo = st.number_input("Orden visual", min_value=1, step=1, value=100)
-                eq_emp_nuevo = st.number_input("Equivalente empanadas", min_value=0.0, step=1.0, value=0.0)
+                eq_emp_nuevo = st.number_input(
+                    "Equivalente empanadas", min_value=0.0, step=1.0, value=0.0
+                )
                 obs_nuevo = st.text_input("Observaciones")
 
                 guardar_nuevo = st.form_submit_button("Crear producto")
@@ -988,21 +874,24 @@ elif st.session_state.pantalla == "Productos":
                     try:
                         cat_row = df_cat[df_cat["nombre"] == categoria_nueva].iloc[0]
 
-                        rpc_call("rpc_crear_producto", {
-                            "p_nombre": nombre_nuevo.strip(),
-                            "p_nombre_normalizado": normalizar_nombre_py(nombre_nuevo.strip()),
-                            "p_categoria_id": int(cat_row["id"]),
-                            "p_subtipo": str(cat_row["codigo"]).lower(),
-                            "p_activo": activo_nuevo,
-                            "p_es_vendible": True,
-                            "p_es_producible": producible_nuevo,
-                            "p_afecta_forecast": forecast_nuevo,
-                            "p_visible_en_control_diario": visible_control_nuevo,
-                            "p_visible_en_forecast": visible_forecast_nuevo,
-                            "p_orden_visual": int(orden_nuevo),
-                            "p_uds_equivalentes_empanadas": float(eq_emp_nuevo),
-                            "p_observaciones": obs_nuevo if obs_nuevo else None
-                        })
+                        rpc_call(
+                            "rpc_crear_producto",
+                            {
+                                "p_nombre": nombre_nuevo.strip(),
+                                "p_nombre_normalizado": normalizar_nombre_py(nombre_nuevo.strip()),
+                                "p_categoria_id": int(cat_row["id"]),
+                                "p_subtipo": str(cat_row["codigo"]).lower(),
+                                "p_activo": activo_nuevo,
+                                "p_es_vendible": True,
+                                "p_es_producible": producible_nuevo,
+                                "p_afecta_forecast": forecast_nuevo,
+                                "p_visible_en_control_diario": visible_control_nuevo,
+                                "p_visible_en_forecast": visible_forecast_nuevo,
+                                "p_orden_visual": int(orden_nuevo),
+                                "p_uds_equivalentes_empanadas": float(eq_emp_nuevo),
+                                "p_observaciones": obs_nuevo if obs_nuevo else None,
+                            },
+                        )
 
                         clear_cache()
                         st.success("✅ Producto creado")
@@ -1027,20 +916,30 @@ elif st.session_state.pantalla == "Empleados":
 
             if guardar and nombre.strip():
                 try:
-                    rpc_call("rpc_crear_empleado", {
-                        "p_local_id": LOCAL_ID,
-                        "p_codigo_pos": None,
-                        "p_nombre": nombre.strip(),
-                        "p_rol": rol,
-                        "p_fecha_alta": str(datetime.date.today())
-                    })
+                    rpc_call(
+                        "rpc_crear_empleado",
+                        {
+                            "p_local_id": LOCAL_ID,
+                            "p_codigo_pos": None,
+                            "p_nombre": nombre.strip(),
+                            "p_rol": rol,
+                            "p_fecha_alta": str(datetime.date.today()),
+                        },
+                    )
                     clear_cache()
                     st.success("✅ Empleado creado")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error creando empleado: {e}")
 
-    res_emp = conn.table("empleados_v2").select("*").eq("local_id", LOCAL_ID).order("activo", desc=True).order("nombre").execute()
+    res_emp = (
+        conn.table("empleados_v2")
+        .select("*")
+        .eq("local_id", LOCAL_ID)
+        .order("activo", desc=True)
+        .order("nombre")
+        .execute()
+    )
     df_emp = df_from_res(res_emp)
 
     if df_emp.empty:
@@ -1054,10 +953,13 @@ elif st.session_state.pantalla == "Empleados":
             if row["activo"]:
                 if c3.button("Baja", key=f"baja_emp_{row['id']}"):
                     try:
-                        rpc_call("rpc_baja_empleado", {
-                            "p_id": int(row["id"]),
-                            "p_fecha_baja": str(datetime.date.today())
-                        })
+                        rpc_call(
+                            "rpc_baja_empleado",
+                            {
+                                "p_id": int(row["id"]),
+                                "p_fecha_baja": str(datetime.date.today()),
+                            },
+                        )
                         clear_cache()
                         st.success("✅ Empleado dado de baja")
                         st.rerun()
@@ -1076,7 +978,7 @@ elif st.session_state.pantalla == "Operativa":
     col1, col2 = st.columns(2)
     fecha_sel = col1.date_input("Fecha", value=datetime.date.today())
 
-    df_emp = cargar_empleados_activos()
+    df_emp = cargar_empleados_activos(LOCAL_ID)
     if df_emp.empty:
         st.error("No hay empleados activos. Crea al menos uno.")
         st.stop()
@@ -1090,13 +992,13 @@ elif st.session_state.pantalla == "Operativa":
         key_prefix="operativa",
         solo_activos=True,
         solo_control=True,
-        solo_forecast=False
+        solo_forecast=False,
     )
 
     df_control_dim = DF_DIM.copy()
     df_control_dim = df_control_dim[
-        (df_control_dim["activo"] == True) &
-        (df_control_dim["visible_en_control_diario"] == True)
+        (df_control_dim["activo"] == True)
+        & (df_control_dim["visible_en_control_diario"] == True)
     ]
 
     if categorias_sel:
@@ -1113,7 +1015,7 @@ elif st.session_state.pantalla == "Operativa":
     df_hoy = cargar_control_diario(fecha_sel, LOCAL_ID)
     df_ayer = cargar_control_ayer(fecha_sel - datetime.timedelta(days=1), LOCAL_ID)
 
-    dict_hoy = {}
+    dict_hoy: Dict[int, Dict[str, Any]] = {}
     if not df_hoy.empty:
         dict_hoy = {
             int(r["producto_id"]): {
@@ -1121,45 +1023,48 @@ elif st.session_state.pantalla == "Operativa":
                 "horneados": safe_float(r["horneados"]),
                 "merma": safe_float(r["merma"]),
                 "resto": safe_float(r["resto"]),
-                "incidencias": r.get("incidencias")
+                "incidencias": r.get("incidencias"),
             }
             for _, r in df_hoy.iterrows()
         }
 
-    dict_ayer = {}
+    dict_ayer: Dict[int, float] = {}
     if not df_ayer.empty:
         dict_ayer = {
-            int(r["producto_id"]): safe_float(r["resto"])
-            for _, r in df_ayer.iterrows()
+            int(r["producto_id"]): safe_float(r["resto"]) for _, r in df_ayer.iterrows()
         }
 
-    filas = []
+    filas: List[Dict[str, Any]] = []
     for _, p in df_control_dim.iterrows():
         pid = int(p["producto_id"])
 
         if pid in dict_hoy:
             base = dict_hoy[pid]
-            filas.append({
-                "producto_id": pid,
-                "categoria": p["categoria_nombre"],
-                "producto": p["producto_nombre"],
-                "stock_inicial": base["stock_inicial"],
-                "horneados": base["horneados"],
-                "merma": base["merma"],
-                "resto": base["resto"],
-                "incidencias": base.get("incidencias")
-            })
+            filas.append(
+                {
+                    "producto_id": pid,
+                    "categoria": p["categoria_nombre"],
+                    "producto": p["producto_nombre"],
+                    "stock_inicial": base["stock_inicial"],
+                    "horneados": base["horneados"],
+                    "merma": base["merma"],
+                    "resto": base["resto"],
+                    "incidencias": base.get("incidencias"),
+                }
+            )
         else:
-            filas.append({
-                "producto_id": pid,
-                "categoria": p["categoria_nombre"],
-                "producto": p["producto_nombre"],
-                "stock_inicial": dict_ayer.get(pid, 0),
-                "horneados": 0,
-                "merma": 0,
-                "resto": 0,
-                "incidencias": None
-            })
+            filas.append(
+                {
+                    "producto_id": pid,
+                    "categoria": p["categoria_nombre"],
+                    "producto": p["producto_nombre"],
+                    "stock_inicial": dict_ayer.get(pid, 0),
+                    "horneados": 0,
+                    "merma": 0,
+                    "resto": 0,
+                    "incidencias": None,
+                }
+            )
 
     df_editor = pd.DataFrame(filas)
 
@@ -1175,8 +1080,8 @@ elif st.session_state.pantalla == "Operativa":
             "horneados": st.column_config.NumberColumn("Horneados", step=1),
             "merma": st.column_config.NumberColumn("Merma", step=1),
             "resto": st.column_config.NumberColumn("Resto", step=1),
-            "incidencias": st.column_config.TextColumn("Incidencias")
-        }
+            "incidencias": st.column_config.TextColumn("Incidencias"),
+        },
     )
 
     st.divider()
@@ -1191,16 +1096,23 @@ elif st.session_state.pantalla == "Operativa":
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if st.button("➕ Guardar hornada"):
             try:
-                pid = int(df_control_dim[df_control_dim["producto_nombre"] == producto_horno].iloc[0]["producto_id"])
-                rpc_call("rpc_crear_hornada", {
-                    "p_local_id": LOCAL_ID,
-                    "p_fecha": str(fecha_sel),
-                    "p_fecha_hora": datetime.datetime.now().isoformat(),
-                    "p_producto_id": pid,
-                    "p_cantidad": float(cantidad_horno),
-                    "p_empleado_id": empleado_id,
-                    "p_notas": None
-                })
+                pid = int(
+                    df_control_dim[df_control_dim["producto_nombre"] == producto_horno].iloc[0][
+                        "producto_id"
+                    ]
+                )
+                rpc_call(
+                    "rpc_crear_hornada",
+                    {
+                        "p_local_id": LOCAL_ID,
+                        "p_fecha": str(fecha_sel),
+                        "p_fecha_hora": datetime.datetime.now().isoformat(),
+                        "p_producto_id": pid,
+                        "p_cantidad": float(cantidad_horno),
+                        "p_empleado_id": empleado_id,
+                        "p_notas": None,
+                    },
+                )
                 clear_cache()
                 st.success("✅ Hornada registrada")
                 st.rerun()
@@ -1213,27 +1125,33 @@ elif st.session_state.pantalla == "Operativa":
         df_hornadas = df_hornadas.merge(
             DF_DIM[["producto_id", "producto_nombre"]],
             on="producto_id",
-            how="left"
+            how="left",
         )
-        resumen_h = df_hornadas.groupby("producto_nombre", as_index=False)["cantidad"].sum().sort_values("cantidad", ascending=False)
+        resumen_h = (
+            df_hornadas.groupby("producto_nombre", as_index=False)["cantidad"]
+            .sum()
+            .sort_values("cantidad", ascending=False)
+        )
         st.write("### Hornadas registradas hoy")
         st.dataframe(resumen_h, use_container_width=True, hide_index=True)
 
     if st.button("💾 Guardar control diario"):
         try:
-            payloads = []
+            payloads: List[Dict[str, Any]] = []
             for _, row in editado.iterrows():
-                payloads.append({
-                    "local_id": LOCAL_ID,
-                    "fecha": str(fecha_sel),
-                    "producto_id": int(row["producto_id"]),
-                    "empleado_id": empleado_id,
-                    "stock_inicial": safe_float(row["stock_inicial"]),
-                    "horneados": safe_float(row["horneados"]),
-                    "merma": safe_float(row["merma"]),
-                    "resto": safe_float(row["resto"]),
-                    "incidencias": row["incidencias"] if pd.notnull(row["incidencias"]) else None
-                })
+                payloads.append(
+                    {
+                        "local_id": LOCAL_ID,
+                        "fecha": str(fecha_sel),
+                        "producto_id": int(row["producto_id"]),
+                        "empleado_id": empleado_id,
+                        "stock_inicial": safe_float(row["stock_inicial"]),
+                        "horneados": safe_float(row["horneados"]),
+                        "merma": safe_float(row["merma"]),
+                        "resto": safe_float(row["resto"]),
+                        "incidencias": row["incidencias"] if pd.notnull(row["incidencias"]) else None,
+                    }
+                )
 
             guardar_control_diario(payloads)
             clear_cache()
@@ -1260,11 +1178,11 @@ elif st.session_state.pantalla == "BI":
         key_prefix="bi",
         solo_activos=False,
         solo_control=False,
-        solo_forecast=False
+        solo_forecast=False,
     )
 
     with st.spinner("Cargando ventas..."):
-        df_sales = cargar_ventas_rango(fecha_ini, fecha_fin)
+        df_sales = cargar_ventas_rango(fecha_ini, fecha_fin, LOCAL_ID)
 
     if df_sales.empty:
         st.warning("No hay ventas en ese rango.")
@@ -1292,16 +1210,18 @@ elif st.session_state.pantalla == "BI":
     df_day = df_sales.groupby("fecha", as_index=False).agg(
         ventas=("neto", "sum"),
         unidades=("uds_v", "sum"),
-        tickets=("ticket_uid", "nunique")
+        tickets=("ticket_uid", "nunique"),
     )
 
     fig_day = px.line(df_day, x="fecha", y="ventas", title="Ventas por día")
     st.plotly_chart(fig_day, use_container_width=True)
 
-    df_prod = df_sales.groupby(["producto_nombre", "categoria_nombre"], as_index=False).agg(
-        ventas=("neto", "sum"),
-        unidades=("uds_v", "sum")
-    ).sort_values("ventas", ascending=False).head(20)
+    df_prod = (
+        df_sales.groupby(["producto_nombre", "categoria_nombre"], as_index=False)
+        .agg(ventas=("neto", "sum"), unidades=("uds_v", "sum"))
+        .sort_values("ventas", ascending=False)
+        .head(20)
+    )
 
     col_g1, col_g2 = st.columns(2)
 
@@ -1311,17 +1231,20 @@ elif st.session_state.pantalla == "BI":
             x="producto_nombre",
             y="ventas",
             color="categoria_nombre",
-            title="Top productos por ventas"
+            title="Top productos por ventas",
         )
         st.plotly_chart(fig_top, use_container_width=True)
 
     with col_g2:
         df_hour = df_sales.copy()
-        df_hour["hora_num"] = pd.to_datetime(df_hour["hora"], format="%H:%M:%S", errors="coerce").dt.hour
-        df_hour = df_hour.groupby("hora_num", as_index=False).agg(
-            ventas=("neto", "sum"),
-            unidades=("uds_v", "sum")
-        ).sort_values("hora_num")
+        df_hour["hora_num"] = pd.to_datetime(
+            df_hour["hora"], format="%H:%M:%S", errors="coerce"
+        ).dt.hour
+        df_hour = (
+            df_hour.groupby("hora_num", as_index=False)
+            .agg(ventas=("neto", "sum"), unidades=("uds_v", "sum"))
+            .sort_values("hora_num")
+        )
         fig_hour = px.bar(df_hour, x="hora_num", y="ventas", title="Ventas por hora")
         st.plotly_chart(fig_hour, use_container_width=True)
 
@@ -1342,7 +1265,7 @@ elif st.session_state.pantalla == "Forecast":
     estrategia = c2.select_slider(
         "Estrategia",
         options=["Defensiva", "Equilibrada", "Agresiva"],
-        value="Equilibrada"
+        value="Equilibrada",
     )
     es_festivo = c3.toggle("Festivo / Puente", value=False)
 
@@ -1352,31 +1275,35 @@ elif st.session_state.pantalla == "Forecast":
         key_prefix="forecast",
         solo_activos=True,
         solo_control=False,
-        solo_forecast=True
+        solo_forecast=True,
     )
 
     if st.button("🚀 Calcular forecast"):
         df_forecast_dim = DF_DIM.copy()
         df_forecast_dim = df_forecast_dim[
-            (df_forecast_dim["activo"] == True) &
-            (df_forecast_dim["visible_en_forecast"] == True) &
-            (df_forecast_dim["afecta_forecast"] == True)
+            (df_forecast_dim["activo"] == True)
+            & (df_forecast_dim["visible_en_forecast"] == True)
+            & (df_forecast_dim["afecta_forecast"] == True)
         ]
 
         fecha_pred_ts = pd.to_datetime(fecha_pred)
 
         if "fecha_inicio_venta" in df_forecast_dim.columns:
-            df_forecast_dim["fecha_inicio_venta"] = pd.to_datetime(df_forecast_dim["fecha_inicio_venta"], errors="coerce")
+            df_forecast_dim["fecha_inicio_venta"] = pd.to_datetime(
+                df_forecast_dim["fecha_inicio_venta"], errors="coerce"
+            )
             df_forecast_dim = df_forecast_dim[
-                df_forecast_dim["fecha_inicio_venta"].isna() |
-                (df_forecast_dim["fecha_inicio_venta"] <= fecha_pred_ts)
+                df_forecast_dim["fecha_inicio_venta"].isna()
+                | (df_forecast_dim["fecha_inicio_venta"] <= fecha_pred_ts)
             ]
 
         if "fecha_fin_venta" in df_forecast_dim.columns:
-            df_forecast_dim["fecha_fin_venta"] = pd.to_datetime(df_forecast_dim["fecha_fin_venta"], errors="coerce")
+            df_forecast_dim["fecha_fin_venta"] = pd.to_datetime(
+                df_forecast_dim["fecha_fin_venta"], errors="coerce"
+            )
             df_forecast_dim = df_forecast_dim[
-                df_forecast_dim["fecha_fin_venta"].isna() |
-                (df_forecast_dim["fecha_fin_venta"] >= fecha_pred_ts)
+                df_forecast_dim["fecha_fin_venta"].isna()
+                | (df_forecast_dim["fecha_fin_venta"] >= fecha_pred_ts)
             ]
 
         if categorias_sel:
@@ -1391,7 +1318,11 @@ elif st.session_state.pantalla == "Forecast":
         fecha_ini_hist = fecha_pred - datetime.timedelta(days=365)
 
         with st.spinner("Analizando histórico..."):
-            df_sales = cargar_ventas_rango(fecha_ini_hist, fecha_pred - datetime.timedelta(days=1))
+            df_sales = cargar_ventas_rango(
+                fecha_ini_hist,
+                fecha_pred - datetime.timedelta(days=1),
+                LOCAL_ID,
+            )
 
         if df_sales.empty:
             st.warning("No hay histórico suficiente.")
@@ -1400,21 +1331,23 @@ elif st.session_state.pantalla == "Forecast":
         df_sales = df_sales.merge(
             df_forecast_dim[["producto_id", "producto_nombre"]],
             on="producto_id",
-            how="inner"
+            how="inner",
         )
 
         if df_sales.empty:
             st.warning("No hay ventas históricas para esos productos.")
             st.stop()
 
-        df_daily = df_sales.groupby(["fecha", "producto_id", "producto_nombre"], as_index=False)["uds_v"].sum()
+        df_daily = df_sales.groupby(["fecha", "producto_id", "producto_nombre"], as_index=False)[
+            "uds_v"
+        ].sum()
         df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
         objetivo_dow = fecha_pred.weekday()
 
         pct_map = {"Defensiva": 50, "Equilibrada": 75, "Agresiva": 88}
         pct = pct_map[estrategia]
 
-        resultados = []
+        resultados: List[Dict[str, Any]] = []
 
         for _, p in df_forecast_dim.iterrows():
             pid = p["producto_id"]
@@ -1427,7 +1360,7 @@ elif st.session_state.pantalla == "Forecast":
             if hist.empty:
                 base = sub["uds_v"].mean() if not sub.empty else 0
             else:
-                base = np.percentile(hist, pct)
+                base = float(np.percentile(hist, pct))
 
             if es_festivo:
                 base *= 1.15
@@ -1437,12 +1370,14 @@ elif st.session_state.pantalla == "Forecast":
 
             total = int(np.ceil(base))
             if total > 0:
-                resultados.append({
-                    "Producto": nombre,
-                    "Total sugerido": total,
-                    "Tanda 1": int(np.ceil(total * 0.7)),
-                    "Tanda 2": int(np.floor(total * 0.3))
-                })
+                resultados.append(
+                    {
+                        "Producto": nombre,
+                        "Total sugerido": total,
+                        "Tanda 1": int(np.ceil(total * 0.7)),
+                        "Tanda 2": int(np.floor(total * 0.3)),
+                    }
+                )
 
         if not resultados:
             st.warning("No pude generar forecast.")
@@ -1458,7 +1393,9 @@ elif st.session_state.pantalla == "Forecast":
         txt += "-" * 25 + "\n"
 
         for _, r in df_res.iterrows():
-            txt += f"• {r['Producto']}: {r['Tanda 1']} + {r['Tanda 2']} = *{r['Total sugerido']}*\n"
+            txt += (
+                f"• {r['Producto']}: {r['Tanda 1']} + {r['Tanda 2']} = *{r['Total sugerido']}*\n"
+            )
 
         st.text_area("Texto para WhatsApp", txt, height=300)
 
@@ -1471,7 +1408,13 @@ elif st.session_state.pantalla == "Pendientes":
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("🧩 Artículos pendientes de mapear")
 
-    res_pend = conn.table("articulos_pendientes_v2").select("*").eq("estado", "pendiente").order("veces_detectado", desc=True).execute()
+    res_pend = (
+        conn.table("articulos_pendientes_v2")
+        .select("*")
+        .eq("estado", "pendiente")
+        .order("veces_detectado", desc=True)
+        .execute()
+    )
     df_pend = df_from_res(res_pend)
 
     if df_pend.empty:
@@ -1479,9 +1422,17 @@ elif st.session_state.pantalla == "Pendientes":
         st.stop()
 
     st.dataframe(
-        df_pend[["articulo_raw_ejemplo", "alias_normalizado", "veces_detectado", "primera_fecha", "ultima_fecha"]],
+        df_pend[
+            [
+                "articulo_raw_ejemplo",
+                "alias_normalizado",
+                "veces_detectado",
+                "primera_fecha",
+                "ultima_fecha",
+            ]
+        ],
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
     st.divider()
@@ -1502,11 +1453,14 @@ elif st.session_state.pantalla == "Pendientes":
         try:
             pid = int(DF_DIM[DF_DIM["producto_nombre"] == producto_destino].iloc[0]["producto_id"])
 
-            rpc_call("rpc_resolver_pendiente", {
-                "p_alias_normalizado": alias_sel,
-                "p_alias_raw": df_match["articulo_raw_ejemplo"],
-                "p_producto_id": pid
-            })
+            rpc_call(
+                "rpc_resolver_pendiente",
+                {
+                    "p_alias_normalizado": alias_sel,
+                    "p_alias_raw": df_match["articulo_raw_ejemplo"],
+                    "p_producto_id": pid,
+                },
+            )
 
             clear_cache()
             st.success("✅ Pendiente resuelto")
@@ -1516,16 +1470,24 @@ elif st.session_state.pantalla == "Pendientes":
 
     if c2.button("🚫 Marcar como descartado"):
         try:
-            rpc_call("rpc_descartar_pendiente", {
-                "p_alias_normalizado": alias_sel,
-                "p_nota": "Descartado manualmente desde Streamlit"
-            })
+            rpc_call(
+                "rpc_descartar_pendiente",
+                {
+                    "p_alias_normalizado": alias_sel,
+                    "p_nota": "Descartado manualmente desde Streamlit",
+                },
+            )
 
             clear_cache()
             st.success("✅ Pendiente descartado")
             st.rerun()
         except Exception as e:
             st.error(f"Error descartando pendiente: {e}")
+
+
+# =========================================================
+# CARGA VENTAS CSV
+# =========================================================
 
 elif st.session_state.pantalla == "CargaVentas":
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
@@ -1540,6 +1502,7 @@ elif st.session_state.pantalla == "CargaVentas":
 
     if archivo is not None:
         file_bytes = archivo.getvalue()
+        reset_analisis_csv_si_cambia_archivo(file_bytes, archivo.name)
 
         try:
             df_preview, encoding_detectado, sep_detectado = leer_csv_preview(file_bytes, nrows=200)
@@ -1575,7 +1538,7 @@ elif st.session_state.pantalla == "CargaVentas":
         }
 
         cols = st.columns(3)
-        mapping = {}
+        mapping: Dict[str, str] = {}
 
         for i, (key, label) in enumerate(campos.items()):
             default_value = mapping_guardado.get(key)
@@ -1587,22 +1550,37 @@ elif st.session_state.pantalla == "CargaVentas":
                     label,
                     options,
                     index=default_index,
-                    key=f"csv_map_{key}"
+                    key=f"csv_map_{key}",
                 )
 
-        obligatorios = ["fecha", "hora", "serie_numero", "establecimiento", "caja", "uds_v", "articulo", "base", "impuestos", "dto_total", "neto"]
+        obligatorios = [
+            "fecha",
+            "hora",
+            "serie_numero",
+            "establecimiento",
+            "caja",
+            "uds_v",
+            "articulo",
+            "base",
+            "impuestos",
+            "dto_total",
+            "neto",
+        ]
         mapeo_valido = all(mapping.get(k) for k in obligatorios)
 
         c1, c2 = st.columns(2)
 
         if c1.button("💾 Guardar mapeo"):
             try:
-                rpc_call("rpc_save_import_mapping", {
-                    "p_import_type": "ventas_diarias",
-                    "p_mapping": mapping,
-                    "p_separator": sep_detectado,
-                    "p_encoding": encoding_detectado
-                })
+                rpc_call(
+                    "rpc_save_import_mapping",
+                    {
+                        "p_import_type": "ventas_diarias",
+                        "p_mapping": mapping,
+                        "p_separator": sep_detectado,
+                        "p_encoding": encoding_detectado,
+                    },
+                )
                 st.success("✅ Mapeo guardado")
             except Exception as e:
                 st.error(f"Error guardando mapeo: {e}")
@@ -1618,7 +1596,7 @@ elif st.session_state.pantalla == "CargaVentas":
                     sep=sep_detectado,
                     encoding=encoding_detectado,
                     mapping=mapping,
-                    file_name=archivo.name
+                    file_name=archivo.name,
                 )
 
                 st.session_state["analisis_subida_ventas"] = {
@@ -1626,7 +1604,8 @@ elif st.session_state.pantalla == "CargaVentas":
                     "sep": sep_detectado,
                     "encoding": encoding_detectado,
                     "file_name": archivo.name,
-                    "resumen": resumen
+                    "file_bytes": file_bytes,
+                    "resumen": resumen,
                 }
 
                 st.success("✅ Análisis completado")
@@ -1649,19 +1628,24 @@ elif st.session_state.pantalla == "CargaVentas":
 
             if st.button("🚀 Subir ventas"):
                 try:
-                    # guardar mapeo
-                    rpc_call("rpc_save_import_mapping", {
-                        "p_import_type": "ventas_diarias",
-                        "p_mapping": analisis["mapping"],
-                        "p_separator": analisis["sep"],
-                        "p_encoding": analisis["encoding"]
-                    })
+                    rpc_call(
+                        "rpc_save_import_mapping",
+                        {
+                            "p_import_type": "ventas_diarias",
+                            "p_mapping": analisis["mapping"],
+                            "p_separator": analisis["sep"],
+                            "p_encoding": analisis["encoding"],
+                        },
+                    )
 
-                    batch_resp = rpc_call("rpc_crear_import_batch", {
-                        "p_local_id": LOCAL_ID,
-                        "p_nombre_archivo": analisis["file_name"],
-                        "p_tipo_import": "ventas_diarias"
-                    })
+                    batch_resp = rpc_call(
+                        "rpc_crear_import_batch",
+                        {
+                            "p_local_id": LOCAL_ID,
+                            "p_nombre_archivo": analisis["file_name"],
+                            "p_tipo_import": "ventas_diarias",
+                        },
+                    )
                     batch_id = int(rpc_scalar(batch_resp))
 
                     total_fisicas = 0
@@ -1671,12 +1655,17 @@ elif st.session_state.pantalla == "CargaVentas":
                     total_iguales = 0
                     total_subidas = 0
 
-                    ticket_state = {}
+                    ticket_state: Dict[str, int] = {}
                     current_row_num = 0
-                    all_line_uids_from_file = []
+                    all_line_uids_from_file: List[str] = []
 
                     with st.spinner("Subiendo..."):
-                        for chunk in iter_csv_chunks(file_bytes, sep=analisis["sep"], encoding=analisis["encoding"], chunksize=20000):
+                        for chunk in iter_csv_chunks(
+                            analisis["file_bytes"],
+                            sep=analisis["sep"],
+                            encoding=analisis["encoding"],
+                            chunksize=20000,
+                        ):
                             total_fisicas += len(chunk)
 
                             rows, current_row_num, ticket_state = prepare_rows_chunk(
@@ -1684,18 +1673,22 @@ elif st.session_state.pantalla == "CargaVentas":
                                 analisis["mapping"],
                                 analisis["file_name"],
                                 current_row_num,
-                                ticket_state
+                                ticket_state,
                             )
 
                             if not rows:
                                 continue
 
-                            df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
+                            df_rows = pd.DataFrame(rows).drop_duplicates(
+                                subset=["line_uid"], keep="last"
+                            )
                             total_unicas += len(df_rows)
 
-                            existing_map = fetch_existing_by_ticket_uids(df_rows["ticket_uid_raw"].drop_duplicates().tolist())
+                            existing_map = fetch_existing_by_ticket_uids(
+                                df_rows["ticket_uid_raw"].drop_duplicates().tolist()
+                            )
 
-                            rows_to_write = []
+                            rows_to_write: List[Dict[str, Any]] = []
 
                             for _, r in df_rows.iterrows():
                                 all_line_uids_from_file.append(r["line_uid"])
@@ -1713,12 +1706,12 @@ elif st.session_state.pantalla == "CargaVentas":
                                     total_iguales += 1
 
                             if rows_to_write:
-                                resp = rpc_call("rpc_upsert_ventas_raw_batch", {
-                                    "p_batch_id": batch_id,
-                                    "p_rows": rows_to_write
-                                })
+                                resp = rpc_call(
+                                    "rpc_upsert_ventas_raw_batch",
+                                    {"p_batch_id": batch_id, "p_rows": rows_to_write},
+                                )
 
-                                written_ids = []
+                                written_ids: List[int] = []
                                 if isinstance(resp, dict):
                                     written_ids = resp.get("written_ids", [])
                                 elif isinstance(resp, list) and resp:
@@ -1731,30 +1724,33 @@ elif st.session_state.pantalla == "CargaVentas":
                                 if written_ids:
                                     lote = 1000
                                     for i in range(0, len(written_ids), lote):
-                                        rpc_call("rpc_sync_staging_by_raw_ids", {
-                                            "p_raw_ids": written_ids[i:i+lote]
-                                        })
+                                        rpc_call(
+                                            "rpc_sync_staging_by_raw_ids",
+                                            {"p_raw_ids": written_ids[i : i + lote]},
+                                        )
 
-                    # verificación final
                     unique_line_uids = list(set(all_line_uids_from_file))
                     verificados = 0
                     lote = 500
 
                     for i in range(0, len(unique_line_uids), lote):
-                        sub = unique_line_uids[i:i+lote]
+                        sub = unique_line_uids[i : i + lote]
                         res = conn.table("ventas_raw_v2").select("line_uid").in_("line_uid", sub).execute()
                         verificados += len(res.data or [])
 
                     filas_error = len(unique_line_uids) - verificados
                     estado = "ok" if filas_error == 0 else "error_parcial"
 
-                    rpc_call("rpc_finalizar_import_batch", {
-                        "p_batch_id": batch_id,
-                        "p_filas_totales": len(unique_line_uids),
-                        "p_filas_ok": verificados,
-                        "p_filas_error": filas_error,
-                        "p_estado": estado
-                    })
+                    rpc_call(
+                        "rpc_finalizar_import_batch",
+                        {
+                            "p_batch_id": batch_id,
+                            "p_filas_totales": len(unique_line_uids),
+                            "p_filas_ok": verificados,
+                            "p_filas_error": filas_error,
+                            "p_estado": estado,
+                        },
+                    )
 
                     st.success("✅ Subida completada")
 
@@ -1767,11 +1763,16 @@ elif st.session_state.pantalla == "CargaVentas":
                     r6.metric("Verificadas en BD", f"{verificados:,}")
 
                     if filas_error == 0:
-                        st.success("✅ Verificación correcta: la base contiene exactamente las líneas esperadas.")
+                        st.success(
+                            "✅ Verificación correcta: la base contiene exactamente las líneas esperadas."
+                        )
                     else:
-                        st.error(f"❌ Verificación incompleta: faltan {filas_error} líneas por confirmar.")
+                        st.error(
+                            f"❌ Verificación incompleta: faltan {filas_error} líneas por confirmar."
+                        )
 
                     clear_cache()
+                    st.session_state.pop("analisis_subida_ventas", None)
 
                 except Exception as e:
                     st.error(f"Error en la subida: {e}")
