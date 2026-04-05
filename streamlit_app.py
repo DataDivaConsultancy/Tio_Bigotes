@@ -1,8 +1,9 @@
-import datetime
+23:40 05/04/2026import datetime
 import csv
 import hashlib
 import io
 import re
+import time
 import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -236,29 +237,74 @@ def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
 
 
 
+def _is_transient_supabase_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    needles = [
+        "502",
+        "bad gateway",
+        "cloudflare",
+        "json could not be generated",
+        "gateway",
+        "tempor",
+    ]
+    return any(n in msg for n in needles)
+
+
+
+def _query_existing_line_uids_chunk(sub: List[str]) -> List[Dict[str, Any]]:
+    """
+    Hace consultas pequeñas y, si Supabase devuelve 502/transient error,
+    reintenta y divide el bloque en trozos aún más pequeños.
+    """
+    if not sub:
+        return []
+
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(3):
+        try:
+            res = (
+                conn.table("ventas_raw_v2")
+                .select("id,line_uid,payload_hash")
+                .in_("line_uid", sub)
+                .execute()
+            )
+            return res.data or []
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2 and _is_transient_supabase_error(exc):
+                time.sleep(0.8 * (attempt + 1))
+                continue
+            break
+
+    if len(sub) > 10:
+        mid = len(sub) // 2
+        return _query_existing_line_uids_chunk(sub[:mid]) + _query_existing_line_uids_chunk(sub[mid:])
+
+    if last_exc is not None:
+        raise last_exc
+    return []
+
+
+
 def fetch_existing_by_line_uids(line_uids: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     Busca únicamente las líneas exactas que podrían existir ya en ventas_raw_v2.
-    Esto evita la RPC por ticket completo, que puede hacer scans muy costosos
-    y acabar en statement timeout cuando el CSV trae muchos tickets.
+    Usa bloques pequeños, reintentos y división automática del lote si Supabase
+    devuelve errores 502 o similares.
     """
     if not line_uids:
         return {}
 
     out: Dict[str, Dict[str, Any]] = {}
-    lote = 120
+    lote = 40
     unique_line_uids = list(dict.fromkeys(line_uids))
 
     for i in range(0, len(unique_line_uids), lote):
         sub = unique_line_uids[i : i + lote]
-        res = (
-            conn.table("ventas_raw_v2")
-            .select("id,line_uid,payload_hash")
-            .in_("line_uid", sub)
-            .execute()
-        )
+        rows = _query_existing_line_uids_chunk(sub)
 
-        for r in (res.data or []):
+        for r in rows:
             out[r["line_uid"]] = {
                 "id": r["id"],
                 "payload_hash": r.get("payload_hash"),
@@ -1736,13 +1782,7 @@ elif st.session_state.pantalla == "CargaVentas":
                                         )
 
                     unique_line_uids = list(set(all_line_uids_from_file))
-                    verificados = 0
-                    lote = 500
-
-                    for i in range(0, len(unique_line_uids), lote):
-                        sub = unique_line_uids[i : i + lote]
-                        res = conn.table("ventas_raw_v2").select("line_uid").in_("line_uid", sub).execute()
-                        verificados += len(res.data or [])
+                    verificados = len(fetch_existing_by_line_uids(unique_line_uids))
 
                     filas_error = len(unique_line_uids) - verificados
                     estado = "ok" if filas_error == 0 else "error_parcial"
