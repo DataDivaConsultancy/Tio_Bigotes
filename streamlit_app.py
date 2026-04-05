@@ -1,3 +1,4 @@
+import requests
 import streamlit as st
 import pandas as pd
 from st_supabase_connection import SupabaseConnection, execute_query
@@ -112,8 +113,41 @@ def safe_date_iso(v):
         return None
 
 
-def rpc_call(name: str, params: dict):
-    return execute_query(conn.rpc(name, params), ttl=0)
+def rpc_call(name: str, params: dict | None = None):
+    """
+    Llama a una función Postgres expuesta por Supabase vía REST:
+    POST /rest/v1/rpc/<function_name>
+    """
+    base_url = st.secrets["connections"]["supabase"]["url"].rstrip("/")
+    api_key = st.secrets["connections"]["supabase"]["key"]
+
+    url = f"{base_url}/rest/v1/rpc/{name}"
+
+    headers = {
+        "apikey": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=params or {},
+        timeout=30,
+    )
+
+    if not response.ok:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text
+        raise RuntimeError(f"RPC {name} falló: {detail}")
+
+    # Algunas RPC devuelven filas, otras null/void
+    try:
+        return response.json()
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=60)
