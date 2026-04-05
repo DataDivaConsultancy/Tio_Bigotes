@@ -639,6 +639,9 @@ if st.session_state.pantalla == "Home":
             ir_a("Forecast")
         if st.button("🧩 PENDIENTES"):
             ir_a("Pendientes")
+            
+            if st.button("📥 SUBIR CSV VENTAS"):
+    ir_a("CargaVentas")
 
 
 # =========================================================
@@ -1303,3 +1306,252 @@ elif st.session_state.pantalla == "Pendientes":
             st.rerun()
         except Exception as e:
             st.error(f"Error descartando pendiente: {e}")
+
+elif st.session_state.pantalla == "CargaVentas":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📥 Subida incremental de CSV de ventas")
+
+    st.info(
+        "Guarda el mapeo de columnas y, en cada nueva subida, "
+        "solo inserta líneas nuevas o sobrescribe líneas modificadas."
+    )
+
+    archivo = st.file_uploader("Sube el CSV de ventas", type=["csv"])
+
+    if archivo is not None:
+        file_bytes = archivo.getvalue()
+
+        try:
+            df_preview, encoding_detectado, sep_detectado = leer_csv_preview(file_bytes, nrows=200)
+            st.success(f"CSV leído | Separador: '{sep_detectado}' | Encoding: {encoding_detectado}")
+        except Exception as e:
+            st.error(f"No pude leer el CSV: {e}")
+            st.stop()
+
+        mapping_guardado, _, _ = cargar_mapeo_guardado()
+        columnas = list(df_preview.columns)
+
+        st.write("### Preview")
+        st.dataframe(df_preview.head(20), use_container_width=True)
+
+        st.write("### Mapeo de columnas")
+        campos = {
+            "column1": "Column1 (opcional)",
+            "fecha": "Fecha",
+            "hora": "Hora",
+            "serie_numero": "Serie / Número",
+            "establecimiento": "Establecimiento",
+            "caja": "Caja",
+            "numero": "Número empleado POS (opcional)",
+            "cliente": "Cliente (opcional)",
+            "empleado": "Empleado (opcional)",
+            "uds_v": "Uds.V",
+            "articulo": "Artículo",
+            "subarticulo": "Subartículo (opcional)",
+            "base": "Base",
+            "impuestos": "Impuestos",
+            "dto_total": "Dto",
+            "neto": "Total Neto",
+        }
+
+        cols = st.columns(3)
+        mapping = {}
+
+        for i, (key, label) in enumerate(campos.items()):
+            default_value = mapping_guardado.get(key)
+            options = [""] + columnas
+            default_index = options.index(default_value) if default_value in options else 0
+
+            with cols[i % 3]:
+                mapping[key] = st.selectbox(
+                    label,
+                    options,
+                    index=default_index,
+                    key=f"csv_map_{key}"
+                )
+
+        obligatorios = ["fecha", "hora", "serie_numero", "establecimiento", "caja", "uds_v", "articulo", "base", "impuestos", "dto_total", "neto"]
+        mapeo_valido = all(mapping.get(k) for k in obligatorios)
+
+        c1, c2 = st.columns(2)
+
+        if c1.button("💾 Guardar mapeo"):
+            try:
+                rpc_call("rpc_save_import_mapping", {
+                    "p_import_type": "ventas_diarias",
+                    "p_mapping": mapping,
+                    "p_separator": sep_detectado,
+                    "p_encoding": encoding_detectado
+                })
+                st.success("✅ Mapeo guardado")
+            except Exception as e:
+                st.error(f"Error guardando mapeo: {e}")
+
+        if not mapeo_valido:
+            st.warning("Completa todos los campos obligatorios.")
+            st.stop()
+
+        if c2.button("🔍 Analizar subida"):
+            try:
+                resumen = analizar_csv_incremental(
+                    file_bytes=file_bytes,
+                    sep=sep_detectado,
+                    encoding=encoding_detectado,
+                    mapping=mapping,
+                    file_name=archivo.name
+                )
+
+                st.session_state["analisis_subida_ventas"] = {
+                    "mapping": mapping,
+                    "sep": sep_detectado,
+                    "encoding": encoding_detectado,
+                    "file_name": archivo.name,
+                    "resumen": resumen
+                }
+
+                st.success("✅ Análisis completado")
+            except Exception as e:
+                st.error(f"Error analizando subida: {e}")
+
+        analisis = st.session_state.get("analisis_subida_ventas")
+
+        if analisis:
+            resumen = analisis["resumen"]
+
+            st.write("### Resultado del análisis")
+            a1, a2, a3, a4, a5, a6 = st.columns(6)
+            a1.metric("Líneas físicas CSV", f"{resumen['total_fisicas']:,}")
+            a2.metric("Líneas únicas CSV", f"{resumen['total_unicas']:,}")
+            a3.metric("Nuevas", f"{resumen['nuevas']:,}")
+            a4.metric("Modificadas", f"{resumen['modificadas']:,}")
+            a5.metric("Sin cambios", f"{resumen['iguales']:,}")
+            a6.metric("Se subirán", f"{resumen['a_subir']:,}")
+
+            if st.button("🚀 Subir ventas"):
+                try:
+                    # guardar mapeo
+                    rpc_call("rpc_save_import_mapping", {
+                        "p_import_type": "ventas_diarias",
+                        "p_mapping": analisis["mapping"],
+                        "p_separator": analisis["sep"],
+                        "p_encoding": analisis["encoding"]
+                    })
+
+                    batch_resp = rpc_call("rpc_crear_import_batch", {
+                        "p_local_id": LOCAL_ID,
+                        "p_nombre_archivo": analisis["file_name"],
+                        "p_tipo_import": "ventas_diarias"
+                    })
+                    batch_id = int(rpc_scalar(batch_resp))
+
+                    total_fisicas = 0
+                    total_unicas = 0
+                    total_insertadas = 0
+                    total_actualizadas = 0
+                    total_iguales = 0
+                    total_subidas = 0
+
+                    ticket_state = {}
+                    current_row_num = 0
+                    all_line_uids_from_file = []
+
+                    with st.spinner("Subiendo..."):
+                        for chunk in iter_csv_chunks(file_bytes, sep=analisis["sep"], encoding=analisis["encoding"], chunksize=20000):
+                            total_fisicas += len(chunk)
+
+                            rows, current_row_num, ticket_state = prepare_rows_chunk(
+                                chunk,
+                                analisis["mapping"],
+                                analisis["file_name"],
+                                current_row_num,
+                                ticket_state
+                            )
+
+                            if not rows:
+                                continue
+
+                            df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
+                            total_unicas += len(df_rows)
+
+                            existing_map = fetch_existing_by_ticket_uids(df_rows["ticket_uid_raw"].drop_duplicates().tolist())
+
+                            rows_to_write = []
+
+                            for _, r in df_rows.iterrows():
+                                all_line_uids_from_file.append(r["line_uid"])
+                                old = existing_map.get(r["line_uid"])
+
+                                if old is None:
+                                    total_insertadas += 1
+                                    rows_to_write.append(r.to_dict())
+                                elif old["payload_hash"] != r["payload_hash"]:
+                                    d = r.to_dict()
+                                    d["existing_id"] = old["id"]
+                                    total_actualizadas += 1
+                                    rows_to_write.append(d)
+                                else:
+                                    total_iguales += 1
+
+                            if rows_to_write:
+                                resp = rpc_call("rpc_upsert_ventas_raw_batch", {
+                                    "p_batch_id": batch_id,
+                                    "p_rows": rows_to_write
+                                })
+
+                                written_ids = []
+                                if isinstance(resp, dict):
+                                    written_ids = resp.get("written_ids", [])
+                                elif isinstance(resp, list) and resp:
+                                    first = resp[0]
+                                    if isinstance(first, dict):
+                                        written_ids = first.get("written_ids", [])
+
+                                total_subidas += len(rows_to_write)
+
+                                if written_ids:
+                                    lote = 1000
+                                    for i in range(0, len(written_ids), lote):
+                                        rpc_call("rpc_sync_staging_by_raw_ids", {
+                                            "p_raw_ids": written_ids[i:i+lote]
+                                        })
+
+                    # verificación final
+                    unique_line_uids = list(set(all_line_uids_from_file))
+                    verificados = 0
+                    lote = 500
+
+                    for i in range(0, len(unique_line_uids), lote):
+                        sub = unique_line_uids[i:i+lote]
+                        res = conn.table("ventas_raw_v2").select("line_uid").in_("line_uid", sub).execute()
+                        verificados += len(res.data or [])
+
+                    filas_error = len(unique_line_uids) - verificados
+                    estado = "ok" if filas_error == 0 else "error_parcial"
+
+                    rpc_call("rpc_finalizar_import_batch", {
+                        "p_batch_id": batch_id,
+                        "p_filas_totales": len(unique_line_uids),
+                        "p_filas_ok": verificados,
+                        "p_filas_error": filas_error,
+                        "p_estado": estado
+                    })
+
+                    st.success("✅ Subida completada")
+
+                    r1, r2, r3, r4, r5, r6 = st.columns(6)
+                    r1.metric("Líneas únicas CSV", f"{len(unique_line_uids):,}")
+                    r2.metric("Insertadas", f"{total_insertadas:,}")
+                    r3.metric("Actualizadas", f"{total_actualizadas:,}")
+                    r4.metric("Sin cambios", f"{total_iguales:,}")
+                    r5.metric("Subidas reales", f"{total_subidas:,}")
+                    r6.metric("Verificadas en BD", f"{verificados:,}")
+
+                    if filas_error == 0:
+                        st.success("✅ Verificación correcta: la base contiene exactamente las líneas esperadas.")
+                    else:
+                        st.error(f"❌ Verificación incompleta: faltan {filas_error} líneas por confirmar.")
+
+                    clear_cache()
+
+                except Exception as e:
+                    st.error(f"Error en la subida: {e}")
