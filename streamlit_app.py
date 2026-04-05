@@ -473,7 +473,16 @@ elif st.session_state.pantalla == "Empleados":
                     "activo": True,
                     "fecha_alta": str(datetime.date.today())
                 }
-                conn.table("empleados_v2").insert(payload).execute()
+                conn.query(
+    "select * from rpc_crear_empleado(:local_id, :codigo_pos, :nombre, :rol, :fecha_alta);",
+    params={
+        "local_id": LOCAL_ID,
+        "codigo_pos": None,
+        "nombre": nombre.strip(),
+        "rol": rol,
+        "fecha_alta": str(datetime.date.today())
+    },
+    ttl=0)
                 clear_cache()
                 st.success("✅ Empleado creado")
                 st.rerun()
