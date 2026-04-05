@@ -399,7 +399,37 @@ elif st.session_state.pantalla == "Productos":
                 "fecha_fin_venta": str(row["fecha_fin_venta"]) if pd.notnull(row["fecha_fin_venta"]) else None,
                 "observaciones": row["observaciones"] if pd.notnull(row["observaciones"]) else None
             }
-            conn.table("productos_v2").update(payload).eq("id", int(row["producto_id"])).execute()
+           conn.query(
+    """
+    select * from rpc_actualizar_producto(
+        :id,
+        :activo,
+        :es_producible,
+        :afecta_forecast,
+        :visible_en_control_diario,
+        :visible_en_forecast,
+        :orden_visual,
+        :uds_equivalentes_empanadas,
+        :fecha_inicio_venta,
+        :fecha_fin_venta,
+        :observaciones
+    );
+    """,
+    params={
+        "id": int(row["producto_id"]),
+        "activo": bool(row["activo"]),
+        "es_producible": bool(row["es_producible"]),
+        "afecta_forecast": bool(row["afecta_forecast"]),
+        "visible_en_control_diario": bool(row["visible_en_control_diario"]),
+        "visible_en_forecast": bool(row["visible_en_forecast"]),
+        "orden_visual": int(row["orden_visual"]) if pd.notnull(row["orden_visual"]) else 100,
+        "uds_equivalentes_empanadas": float(row["uds_equivalentes_empanadas"]) if pd.notnull(row["uds_equivalentes_empanadas"]) else 0,
+        "fecha_inicio_venta": str(row["fecha_inicio_venta"]) if pd.notnull(row["fecha_inicio_venta"]) else None,
+        "fecha_fin_venta": str(row["fecha_fin_venta"]) if pd.notnull(row["fecha_fin_venta"]) else None,
+        "observaciones": row["observaciones"] if pd.notnull(row["observaciones"]) else None
+    },
+    ttl=0
+)
 
         clear_cache()
         st.success("✅ Productos actualizados")
@@ -445,7 +475,41 @@ elif st.session_state.pantalla == "Productos":
                         "uds_equivalentes_bebidas": 0,
                         "observaciones": obs_nuevo if obs_nuevo else None
                     }
-                    conn.table("productos_v2").insert(payload).execute()
+                    conn.query(
+    """
+    select * from rpc_crear_producto(
+        :nombre,
+        :nombre_normalizado,
+        :categoria_id,
+        :subtipo,
+        :activo,
+        :es_vendible,
+        :es_producible,
+        :afecta_forecast,
+        :visible_en_control_diario,
+        :visible_en_forecast,
+        :orden_visual,
+        :uds_equivalentes_empanadas,
+        :observaciones
+    );
+    """,
+    params={
+        "nombre": nombre_nuevo.strip(),
+        "nombre_normalizado": normalizar_nombre_py(nombre_nuevo.strip()),
+        "categoria_id": int(cat_row["id"]),
+        "subtipo": str(cat_row["codigo"]).lower(),
+        "activo": activo_nuevo,
+        "es_vendible": True,
+        "es_producible": producible_nuevo,
+        "afecta_forecast": forecast_nuevo,
+        "visible_en_control_diario": visible_control_nuevo,
+        "visible_en_forecast": visible_forecast_nuevo,
+        "orden_visual": int(orden_nuevo),
+        "uds_equivalentes_empanadas": float(eq_emp_nuevo),
+        "observaciones": obs_nuevo if obs_nuevo else None
+    },
+    ttl=0
+)
                     clear_cache()
                     st.success("✅ Producto creado")
                     st.rerun()
@@ -921,25 +985,15 @@ elif st.session_state.pantalla == "Pendientes":
         pid = int(DF_DIM[DF_DIM["producto_nombre"] == producto_destino].iloc[0]["producto_id"])
         now_iso = datetime.datetime.now().isoformat()
 
-        conn.table("producto_aliases_v2").upsert({
-            "alias_raw": df_match["articulo_raw_ejemplo"],
-            "alias_normalizado": alias_sel,
-            "producto_id": pid,
-            "fuente": "manual_streamlit",
-            "confianza": 1.0,
-            "activo": True
-        }, on_conflict="alias_normalizado").execute()
-
-        conn.table("ventas_staging_v2").update({
-            "producto_id": pid,
-            "estado_mapeo": "mapeado"
-        }).eq("articulo_normalizado", alias_sel).eq("estado_mapeo", "pendiente").execute()
-
-        conn.table("articulos_pendientes_v2").update({
-            "estado": "resuelto",
-            "producto_id_sugerido": pid,
-            "updated_at": now_iso
-        }).eq("alias_normalizado", alias_sel).execute()
+        conn.query(
+    "select rpc_resolver_pendiente(:alias_normalizado, :alias_raw, :producto_id);",
+    params={
+        "alias_normalizado": alias_sel,
+        "alias_raw": df_match["articulo_raw_ejemplo"],
+        "producto_id": pid
+    },
+    ttl=0
+)
 
         clear_cache()
         st.success("✅ Pendiente resuelto")
