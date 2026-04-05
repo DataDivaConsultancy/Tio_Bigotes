@@ -3,14 +3,47 @@ import pandas as pd
 from st_supabase_connection import SupabaseConnection
 import datetime
 import re
+import unicodedata
 import plotly.express as px
-from sklearn.ensemble import RandomForestRegressor
 import numpy as np
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Tío Bigotes Pro", layout="wide", initial_sidebar_state="collapsed")
+# =========================================================
+# CONFIGURACIÓN
+# =========================================================
 
-# --- CONEXIÓN SUPABASE ---
+st.set_page_config(
+    page_title="Tío Bigotes Pro",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+st.markdown("""
+<style>
+div.stButton > button:first-child {
+    height: 90px;
+    width: 100%;
+    font-size: 18px;
+    font-weight: 700;
+    border-radius: 14px;
+    background-color: #ff9800;
+    color: white;
+    border: none;
+    margin-bottom: 12px;
+}
+div.stButton > button:first-child:hover {
+    background-color: #e68a00;
+    border: 2px solid #333;
+}
+.block-container {
+    padding-top: 1.2rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# CONEXIÓN
+# =========================================================
+
 try:
     conn = st.connection(
         "supabase",
@@ -19,321 +52,893 @@ try:
         key=st.secrets["connections"]["supabase"]["key"]
     )
 except Exception as e:
-    st.error(f"Error de conexión: {e}")
+    st.error(f"Error de conexión a Supabase: {e}")
     st.stop()
 
-# --- FUNCIONES AUXILIARES ---
-def limpiar_nombre(texto):
-    if pd.isna(texto): return ""
-    texto = str(texto).upper().strip()
-    texto = re.sub(r'^\d+[\.\s\-]*', '', texto)
-    return texto.strip()
+# =========================================================
+# HELPERS
+# =========================================================
 
-if 'pantalla' not in st.session_state:
-    st.session_state.pantalla = 'Home'
+def normalizar_nombre_py(t: str) -> str:
+    t = unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode("utf-8")
+    t = t.upper().strip()
+    t = re.sub(r'^\d+[\.\-\s]*', '', t)
+    t = re.sub(r'\s+', ' ', t)
+    t = re.sub(r'\.+$', '', t)
+    return t.strip()
+
+def df_from_res(res) -> pd.DataFrame:
+    return pd.DataFrame(res.data) if getattr(res, "data", None) else pd.DataFrame()
+
+def clear_cache():
+    st.cache_data.clear()
+
+@st.cache_data(ttl=60)
+def cargar_local_id() -> int | None:
+    res = conn.table("locales_v2").select("*").eq("codigo", "DIP159").execute()
+    df = df_from_res(res)
+    if df.empty:
+        return None
+    return int(df.iloc[0]["id"])
+
+@st.cache_data(ttl=60)
+def cargar_dim_productos() -> pd.DataFrame:
+    res = conn.table("vw_productos_dim").select("*").execute()
+    df = df_from_res(res)
+    if not df.empty:
+        if "orden_visual" in df.columns:
+            df["orden_visual"] = pd.to_numeric(df["orden_visual"], errors="coerce").fillna(100).astype(int)
+    return df
+
+@st.cache_data(ttl=60)
+def cargar_empleados_activos() -> pd.DataFrame:
+    res = conn.table("empleados_v2").select("*").eq("activo", True).execute()
+    return df_from_res(res)
+
+def fetch_paginated(table_name, columns="*", filters=None, order_by="id", page_size=5000) -> pd.DataFrame:
+    rows = []
+    offset = 0
+
+    while True:
+        q = conn.table(table_name).select(columns)
+
+        if filters:
+            for f in filters:
+                op = f["op"]
+                col = f["col"]
+                val = f["val"]
+
+                if op == "eq":
+                    q = q.eq(col, val)
+                elif op == "gte":
+                    q = q.gte(col, val)
+                elif op == "lte":
+                    q = q.lte(col, val)
+                elif op == "in":
+                    q = q.in_(col, val)
+
+        if order_by:
+            q = q.order(order_by)
+
+        res = q.range(offset, offset + page_size - 1).execute()
+        data = res.data or []
+        rows.extend(data)
+
+        if len(data) < page_size:
+            break
+
+        offset += page_size
+
+    return pd.DataFrame(rows)
+
+def filtros_categoria_producto(
+    df_dim: pd.DataFrame,
+    key_prefix: str,
+    solo_activos=True,
+    solo_control=False,
+    solo_forecast=False
+):
+    df = df_dim.copy()
+
+    if solo_activos and "activo" in df.columns:
+        df = df[df["activo"] == True]
+
+    if solo_control and "visible_en_control_diario" in df.columns:
+        df = df[df["visible_en_control_diario"] == True]
+
+    if solo_forecast and "visible_en_forecast" in df.columns:
+        df = df[df["visible_en_forecast"] == True]
+
+    categorias = sorted(df["categoria_nombre"].dropna().unique().tolist())
+    categorias_sel = st.multiselect(
+        "Categoría",
+        categorias,
+        default=categorias,
+        key=f"{key_prefix}_categorias"
+    )
+
+    if categorias_sel:
+        df = df[df["categoria_nombre"].isin(categorias_sel)]
+    else:
+        df = df.iloc[0:0]
+
+    productos = sorted(df["producto_nombre"].dropna().unique().tolist())
+    productos_sel = st.multiselect(
+        "Producto",
+        productos,
+        default=[],
+        key=f"{key_prefix}_productos"
+    )
+
+    return categorias_sel, productos_sel
+
+def aplicar_filtros_df(df: pd.DataFrame, df_dim: pd.DataFrame, categorias_sel, productos_sel) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    dim_cols = [
+        "producto_id", "producto_nombre", "categoria_nombre",
+        "activo", "es_producible", "afecta_forecast",
+        "visible_en_control_diario", "visible_en_forecast",
+        "orden_visual", "uds_equivalentes_empanadas"
+    ]
+    dim_cols = [c for c in dim_cols if c in df_dim.columns]
+
+    out = df.merge(df_dim[dim_cols], on="producto_id", how="left")
+
+    if categorias_sel:
+        out = out[out["categoria_nombre"].isin(categorias_sel)]
+
+    if productos_sel:
+        out = out[out["producto_nombre"].isin(productos_sel)]
+
+    return out
+
+def cargar_ventas_rango(fecha_ini: datetime.date, fecha_fin: datetime.date) -> pd.DataFrame:
+    df = fetch_paginated(
+        "ventas_staging_v2",
+        columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
+        filters=[
+            {"op": "gte", "col": "fecha", "val": str(fecha_ini)},
+            {"op": "lte", "col": "fecha", "val": str(fecha_fin)},
+        ],
+        order_by="fecha",
+        page_size=10000
+    )
+    if not df.empty:
+        df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+        df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
+        df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
+        if "hora" in df.columns:
+            df["hora"] = df["hora"].astype(str).str.slice(0, 8)
+    return df
+
+def cargar_control_diario(fecha_sel: datetime.date, local_id: int) -> pd.DataFrame:
+    df = fetch_paginated(
+        "control_diario_v2",
+        columns="*",
+        filters=[
+            {"op": "eq", "col": "local_id", "val": local_id},
+            {"op": "eq", "col": "fecha", "val": str(fecha_sel)},
+        ],
+        order_by="producto_id",
+        page_size=1000
+    )
+    return df
+
+def cargar_control_ayer(fecha_ayer: datetime.date, local_id: int) -> pd.DataFrame:
+    df = fetch_paginated(
+        "control_diario_v2",
+        columns="producto_id,resto",
+        filters=[
+            {"op": "eq", "col": "local_id", "val": local_id},
+            {"op": "eq", "col": "fecha", "val": str(fecha_ayer)},
+        ],
+        order_by="producto_id",
+        page_size=1000
+    )
+    return df
+
+def cargar_hornadas_fecha(fecha_sel: datetime.date, local_id: int) -> pd.DataFrame:
+    df = fetch_paginated(
+        "hornadas_eventos_v2",
+        columns="*",
+        filters=[
+            {"op": "eq", "col": "local_id", "val": local_id},
+            {"op": "eq", "col": "fecha", "val": str(fecha_sel)},
+        ],
+        order_by="id",
+        page_size=1000
+    )
+    return df
+
+def guardar_control_diario(payloads):
+    if not payloads:
+        return
+    conn.table("control_diario_v2").upsert(
+        payloads,
+        on_conflict="local_id,fecha,producto_id"
+    ).execute()
+
+# =========================================================
+# ESTADO UI
+# =========================================================
+
+if "pantalla" not in st.session_state:
+    st.session_state.pantalla = "Home"
 
 def ir_a(p):
     st.session_state.pantalla = p
 
-# ==========================================
-#             MENU PRINCIPAL
-# ==========================================
-if st.session_state.pantalla == 'Home':
+# =========================================================
+# DATOS BASE
+# =========================================================
+
+LOCAL_ID = cargar_local_id()
+if not LOCAL_ID:
+    st.error("No encuentro el local DIP159 en la base de datos.")
+    st.stop()
+
+DF_DIM = cargar_dim_productos()
+
+# =========================================================
+# HOME
+# =========================================================
+
+if st.session_state.pantalla == "Home":
     st.title("🥐 Tío Bigotes - Gestión Integral")
+    st.write(f"📍 Diputació 159 | {datetime.date.today().strftime('%d/%m/%Y')}")
     st.divider()
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("📈 1. BI & ANALÍTICA"): ir_a('BI')
-        if st.button("📦 GESTIÓN PRODUCTOS"): ir_a('Productos')
-    with col2:
-        if st.button("📋 2. HOJA CONTROL DIARIO"): ir_a('Operativa')
-        if st.button("👥 GESTIÓN EMPLEADOS"): ir_a('Empleados')
-    with col3:
-        if st.button("📥 3. CARGAR HISTORIAL CSV"): ir_a('Carga')
-        if st.button("🧠 4. IA PREDICTIVA"): ir_a('Dashboard')
 
-# ==========================================
-#        PANTALLA: BI & ANALÍTICA
-# ==========================================
-elif st.session_state.pantalla == 'BI':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.title("📈 Business Intelligence")
-
-    fecha_sel = st.date_input("Día de Análisis:", datetime.date(2026, 3, 31))
-    f_ayer = pd.to_datetime(fecha_sel).date()
-    f_ly = f_ayer - pd.Timedelta(days=364)
-
-    def cargar_datos_bi(d_ayer, d_ly):
-        try:
-            # Ventas de ayer y del año pasado
-            res = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida, total_neto, ticket_id").gte("fecha", str(d_ly)).lte("fecha", str(d_ayer)).limit(50000).execute()
-            df_v = pd.DataFrame(res.data) if res.data else pd.DataFrame()
-            
-            # Productos
-            res_p = conn.table("productos").select("id, nombre").execute()
-            df_p = pd.DataFrame(res_p.data) if res_p.data else pd.DataFrame()
-            
-            # Mermas
-            res_m = conn.table("control_diario").select("fecha, producto_id, merma, stock_inicial, horneados, resto").eq("fecha", str(d_ayer)).execute()
-            df_m = pd.DataFrame(res_m.data) if res_m.data else pd.DataFrame()
-            
-            return df_v, df_p, df_m
-        except: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    dv, dp, dm = cargar_datos_bi(f_ayer, f_ly)
-
-    if dv.empty:
-        st.warning(f"No hay datos para el día {f_ayer}. Asegúrate de haber subido el CSV correctamente.")
-        if st.button("🔍 Ver últimas ventas en BD"):
-            debug = conn.table("historial_ventas").select("fecha, total_neto").limit(5).order("fecha", desc=True).execute()
-            st.write(debug.data)
-    else:
-        dv['fecha'] = pd.to_datetime(dv['fecha']).dt.date
-        v_ayer = dv[dv['fecha'] == f_ayer]
-        v_ly = dv[dv['fecha'] == f_ly]
-
-        fact_ayer = v_ayer['total_neto'].sum()
-        tickets_ayer = v_ayer['ticket_id'].nunique()
-        uds_ayer = v_ayer['cantidad_vendida'].sum()
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Ventas (€)", f"{fact_ayer:,.2f} €")
-        c2.metric("Tickets", f"{tickets_ayer}")
-        c3.metric("Ticket Medio", f"{fact_ayer/tickets_ayer:,.2f} €" if tickets_ayer > 0 else "0 €")
-        c4.metric("Unidades", f"{uds_ayer:,.0f}")
-
-        st.divider()
-        st.subheader("🕵️ Auditoría y Ranking")
-        if not dp.empty:
-            v_ayer_nom = pd.merge(v_ayer, dp, left_on='producto_id', right_on='id')
-            st.table(v_ayer_nom.groupby('nombre')['cantidad_vendida'].sum().sort_values(ascending=False).head(10))
-
-# ==========================================
-#        PANTALLA: CARGA DE DATOS (MAPEO)
-# ==========================================
-elif st.session_state.pantalla == 'Carga':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📥 Importador de Historial")
-    
-    archivo = st.file_uploader("Sube tu archivo CSV", type=['csv'])
-    if archivo:
-        df_csv = pd.read_csv(archivo, encoding='latin-1', sep=None, engine='python')
-        cabeceras = list(df_csv.columns)
-        
-        try:
-            res_cfg = conn.table("config_mapeo").select("mapeo").eq("id", "historial").execute()
-            m_prev = res_cfg.data[0]['mapeo'] if res_cfg.data else {}
-        except: m_prev = {}
-        
-        campos = ["fecha", "producto_id", "cantidad_vendida", "total_neto", "metodo_pago", "ticket_id"]
-        nuevo_mapeo = {}
-        cols = st.columns(3)
-        for i, c_db in enumerate(campos):
-            idx = cabeceras.index(m_prev[c_db]) if c_db in m_prev and m_prev[c_db] in cabeceras else 0
-            with cols[i % 3]:
-                nuevo_mapeo[c_db] = st.selectbox(f"Columna: {c_db}", cabeceras, index=idx)
-
-        if st.button("🚀 INICIAR SUBIDA MASIVA"):
-            rp = conn.table("productos").select("id, nombre").execute()
-            dict_p = {limpiar_nombre(p['nombre']): p['id'] for p in rp.data}
-            df_csv[nuevo_mapeo['fecha']] = pd.to_datetime(df_csv[nuevo_mapeo['fecha']], dayfirst=True, errors='coerce')
-            
-            lote, cont = [], 0
-            for _, fila in df_csv.iterrows():
-                nom = limpiar_nombre(fila[nuevo_mapeo['producto_id']])
-                fec = fila[nuevo_mapeo['fecha']]
-                if nom in dict_p and pd.notnull(fec):
-                    try:
-                        lote.append({
-                            "fecha": fec.strftime('%Y-%m-%d'),
-                            "producto_id": dict_p[nom],
-                            "cantidad_vendida": int(fila[nuevo_mapeo['cantidad_vendida']]),
-                            "total_neto": float(str(fila[nuevo_mapeo['total_neto']]).replace(',', '.')),
-                            "metodo_pago": str(fila[nuevo_mapeo['metodo_pago']]),
-                            "ticket_id": str(fila[nuevo_mapeo['ticket_id']])
-                        })
-                    except: pass
-                if len(lote) >= 1000:
-                    conn.table("historial_ventas").insert(lote).execute()
-                    cont += len(lote); lote = []
-            
-            if lote:
-                conn.table("historial_ventas").insert(lote).execute()
-                cont += len(lote)
-            
-            conn.table("config_mapeo").upsert({"id": "historial", "mapeo": nuevo_mapeo}).execute()
-            st.success(f"✅ Se han subido {cont} registros.")
-
-# ==========================================
-#        PANTALLA: HOJA CONTROL DIARIO
-# ==========================================
-elif st.session_state.pantalla == 'Operativa':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.title("📋 Hoja de Control Diario")
-    
-    col_f, col_e = st.columns(2)
-    fecha_sel = col_f.date_input("Fecha:", datetime.date.today())
-    
-    res_emp = conn.table("empleados").select("id, nombre").eq("activo", True).execute()
-    emps = {e['nombre']: e['id'] for e in res_emp.data} if res_emp.data else {}
-    if not emps: st.error("Crea empleados primero."); st.stop()
-    emp_sel = col_e.selectbox("Responsable:", list(emps.keys()))
-
-    res_p = conn.table("productos").select("id, nombre").execute()
-    df_prod = pd.DataFrame(res_p.data)
-
-    # Cargar resto de ayer
-    ayer = fecha_sel - datetime.timedelta(days=1)
-    res_ayer = conn.table("control_diario").select("producto_id, resto").eq("fecha", str(ayer)).execute()
-    dict_ayer = {r['producto_id']: r['resto'] for r in res_ayer.data} if res_ayer.data else {}
-
-    data_h = [{"ID": r['id'], "Producto": r['nombre'], "Stock Inicial": dict_ayer.get(r['id'], 0), "Horneados": 0, "Merma": 0, "Resto": 0} for _, r in df_prod.iterrows()]
-    df_h = pd.DataFrame(data_h)
-
-    edited = st.data_editor(df_h, hide_index=True, use_container_width=True)
-
-    if st.button("💾 GUARDAR CONTROL"):
-        lote_c = []
-        for _, row in edited.iterrows():
-            if any([row["Horneados"]>0, row["Merma"]>0, row["Resto"]>0]):
-                lote_c.append({
-                    "fecha": str(fecha_sel), "producto_id": row["ID"], "empleado_id": emps[emp_sel],
-                    "stock_inicial": row["Stock Inicial"], "horneados": row["Horneados"], "merma": row["Merma"], "resto": row["Resto"]
-                })
-        if lote_c:
-            conn.table("control_diario").insert(lote_c).execute()
-            st.success("✅ Guardado.")
-
-# ==========================================
-#        PANTALLA: GESTIÓN EMPLEADOS
-# ==========================================
-elif st.session_state.pantalla == 'Empleados':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("👥 Gestión de Empleados")
-    
-    with st.expander("➕ Nuevo Empleado"):
-        with st.form("n_emp"):
-            n = st.text_input("Nombre")
-            r = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
-            if st.form_submit_button("Guardar"):
-                conn.table("empleados").insert({"nombre": n, "rol": r}).execute()
-                st.rerun()
-
-    res = conn.table("empleados").select("*").eq("activo", True).execute()
-    if res.data:
-        df_e = pd.DataFrame(res.data)
-        for _, e in df_e.iterrows():
-            c1, c2 = st.columns([4,1])
-            c1.write(f"👤 {e['nombre']} ({e['rol']})")
-            if c2.button("Baja", key=f"b_{e['id']}"):
-                conn.table("empleados").update({"activo": False}).eq("id", e['id']).execute()
-                st.rerun()
-
-# ==========================================
-#        PANTALLA: GESTIÓN PRODUCTOS
-# ==========================================
-elif st.session_state.pantalla == 'Productos':
-    st.button("⬅️ VOLVER", on_click=ir_a, args=('Home',))
-    st.header("📦 Catálogo de Productos")
-    
-    with st.expander("➕ Nuevo Producto"):
-        with st.form("n_prod"):
-            n = st.text_input("Nombre")
-            c = st.selectbox("Categoría", ["Empanada", "Bebida", "Postre"])
-            if st.form_submit_button("Añadir"):
-                conn.table("productos").insert({"nombre": n, "categoria": c}).execute()
-                st.rerun()
-
-    res = conn.table("productos").select("*").execute()
-    if res.data:
-        st.dataframe(pd.DataFrame(res.data), use_container_width=True)
-
-# ==========================================
-#        PANTALLA: IA PREDICTIVA (MOTOR AMBICIOSO)
-# ==========================================
-elif st.session_state.pantalla == 'Dashboard':
-    st.button("⬅️ VOLVER AL MENÚ", on_click=ir_a, args=('Home',))
-    st.title("🧠 IA Predictiva: Objetivo Crecimiento")
-    
-    # --- CONFIGURACIÓN ---
     c1, c2, c3 = st.columns(3)
-    fecha_pred = c1.date_input("📅 Día para Predecir", datetime.date.today())
-    estrategia = c2.select_slider("🎯 Estrategia de Venta", 
-                                  options=["Defensiva", "Equilibrada", "Agresiva"], 
-                                  value="Agresiva")
-    es_festivo = c3.toggle("🚩 ¿Es Festivo / Puente?", value=True)
+    with c1:
+        if st.button("📦 PRODUCTOS"):
+            ir_a("Productos")
+        if st.button("👥 EMPLEADOS"):
+            ir_a("Empleados")
 
-    if st.button("🚀 CALCULAR PRODUCCIÓN PARA VENDER MÁS"):
-        with st.spinner("Analizando tus mejores días históricos..."):
-            # 1. Carga de datos
-            rv = conn.table("historial_ventas").select("fecha, producto_id, cantidad_vendida").limit(100000).execute()
-            rp = conn.table("productos").select("id, nombre, categoria").eq("categoria", "Empanada").execute()
-            
-            if not rv.data: st.error("No hay datos."); st.stop()
+    with c2:
+        if st.button("📋 CONTROL DIARIO"):
+            ir_a("Operativa")
+        if st.button("📈 HISTORIAL / BI"):
+            ir_a("BI")
 
-            df_v = pd.DataFrame(rv.data)
-            df_p = pd.DataFrame(rp.data)
-            df = pd.merge(df_v, df_p, left_on='producto_id', right_on='id')
-            df['fecha'] = pd.to_datetime(df['fecha'])
+    with c3:
+        if st.button("🧠 FORECAST"):
+            ir_a("Forecast")
+        if st.button("🧩 PENDIENTES"):
+            ir_a("Pendientes")
 
-            # 2. DEFINIR PERCENTIL SEGÚN ESTRATEGIA
-            # Defensiva (50 - Mediana), Equilibrada (70), Agresiva (85 - Tus mejores días)
-            dict_perc = {"Defensiva": 50, "Equilibrada": 75, "Agresiva": 88}
-            p_objetivo = dict_perc[estrategia]
+# =========================================================
+# PRODUCTOS
+# =========================================================
 
-            # 3. FILTRO DE SABORES ACTIVOS (Últimos 45 días)
-            f_corte = df['fecha'].max() - pd.Timedelta(days=45)
-            vivos = df[df['fecha'] >= f_corte]['id'].unique()
+elif st.session_state.pantalla == "Productos":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📦 Catálogo de Productos")
 
-            # 4. CÁLCULO DE PREVISIÓN
-            dia_sem_obj = fecha_pred.weekday()
-            res_ia = []
+    res_dim = conn.table("vw_productos_dim").select("*").execute()
+    df_prod = df_from_res(res_dim)
 
-            for _, prod in df_p.iterrows():
-                if prod['id'] not in vivos: continue
-                
-                sub = df[df['id'] == prod['id']]
-                # Filtramos por el mismo día de la semana
-                hist_dia = sub[sub['fecha'].dt.dayofweek == dia_sem_obj]['cantidad_vendida']
-                
-                if not hist_dia.empty:
-                    # Buscamos el percentil alto para "vender más"
-                    base = np.percentile(hist_dia, p_objetivo)
-                else:
-                    base = sub['cantidad_vendida'].mean() if not sub.empty else 0
+    if df_prod.empty:
+        st.warning("No hay productos cargados.")
+        st.stop()
 
-                # Multiplicador Festivo real de Barcelona (ajustado por historial)
-                # Jueves Santo suele rendir un +20% sobre el mejor jueves normal
-                if es_festivo: base *= 1.20
-                
-                # Bonus por estrategia Agresiva (+10% extra de stock de seguridad)
-                if estrategia == "Agresiva": base *= 1.10
-                
-                uds_final = int(np.ceil(base))
-                
-                if uds_final > 0:
-                    res_ia.append({
-                        "Empanada": prod['nombre'],
-                        "Total Sugerido": uds_final,
-                        "Tanda 1 (Mañana)": int(np.ceil(uds_final * 0.7)),
-                        "Tanda 2 (Tarde)": int(np.floor(uds_final * 0.3))
-                    })
+    col_f1, col_f2, col_f3 = st.columns(3)
 
-            # 5. RESULTADOS
-            if res_ia:
-                df_res = pd.DataFrame(res_ia).sort_values(by="Total Sugerido", ascending=False)
-                
-                st.success(f"🔥 **Modo {estrategia} activado.** Objetivo de empanadas hoy: **{df_res['Total Sugerido'].sum()} unidades**.")
-                
-                st.dataframe(df_res, hide_index=True, use_container_width=True)
-                
-                # WhatsApp para el equipo
-                txt = f"*🚀 PLAN DE ATAQUE - {fecha_pred.strftime('%d/%m/%Y')}*\n"
-                txt += f"*Estrategia:* {estrategia} (Festivo: {'SÍ' if es_festivo else 'NO'})\n"
-                txt += "Previsión para no romper stock y maximizar venta:\n"
-                txt += "-"*25 + "\n"
-                for _, r in df_res.iterrows():
-                    txt += f"• {r['Empanada']}: {r['Tanda 1 (Mañana)']} + {r['Tanda 2 (Tarde)']} = *{r['Total Sugerido']}*\n"
-                
-                st.text_area("Copia para WhatsApp", txt, height=400)
+    categorias = sorted(df_prod["categoria_nombre"].dropna().unique().tolist())
+    cat_sel = col_f1.multiselect("Filtrar por categoría", categorias, default=categorias)
+
+    solo_activos = col_f2.toggle("Solo activos", value=True)
+    solo_forecast = col_f3.toggle("Solo visibles en forecast", value=False)
+
+    df_view = df_prod.copy()
+
+    if cat_sel:
+        df_view = df_view[df_view["categoria_nombre"].isin(cat_sel)]
+
+    if solo_activos:
+        df_view = df_view[df_view["activo"] == True]
+
+    if solo_forecast:
+        df_view = df_view[df_view["visible_en_forecast"] == True]
+
+    df_view = df_view.sort_values(["categoria_nombre", "orden_visual", "producto_nombre"])
+
+    columnas_editor = [
+        "producto_id",
+        "producto_nombre",
+        "categoria_nombre",
+        "activo",
+        "es_producible",
+        "afecta_forecast",
+        "visible_en_control_diario",
+        "visible_en_forecast",
+        "orden_visual",
+        "uds_equivalentes_empanadas",
+        "fecha_inicio_venta",
+        "fecha_fin_venta",
+        "observaciones"
+    ]
+
+    df_edit = df_view[columnas_editor].copy()
+
+    editado = st.data_editor(
+        df_edit,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "producto_id": st.column_config.NumberColumn("ID", disabled=True),
+            "producto_nombre": st.column_config.TextColumn("Producto", disabled=True),
+            "categoria_nombre": st.column_config.TextColumn("Categoría", disabled=True),
+            "activo": st.column_config.CheckboxColumn("Activo"),
+            "es_producible": st.column_config.CheckboxColumn("Producible"),
+            "afecta_forecast": st.column_config.CheckboxColumn("Afecta Forecast"),
+            "visible_en_control_diario": st.column_config.CheckboxColumn("Visible Control"),
+            "visible_en_forecast": st.column_config.CheckboxColumn("Visible Forecast"),
+            "orden_visual": st.column_config.NumberColumn("Orden", step=1),
+            "uds_equivalentes_empanadas": st.column_config.NumberColumn("Eq. Emp", step=1),
+            "fecha_inicio_venta": st.column_config.DateColumn("Inicio venta"),
+            "fecha_fin_venta": st.column_config.DateColumn("Fin venta"),
+            "observaciones": st.column_config.TextColumn("Observaciones")
+        }
+    )
+
+    if st.button("💾 Guardar cambios de productos"):
+        for _, row in editado.iterrows():
+            payload = {
+                "activo": bool(row["activo"]),
+                "es_producible": bool(row["es_producible"]),
+                "afecta_forecast": bool(row["afecta_forecast"]),
+                "visible_en_control_diario": bool(row["visible_en_control_diario"]),
+                "visible_en_forecast": bool(row["visible_en_forecast"]),
+                "orden_visual": int(row["orden_visual"]) if pd.notnull(row["orden_visual"]) else 100,
+                "uds_equivalentes_empanadas": float(row["uds_equivalentes_empanadas"]) if pd.notnull(row["uds_equivalentes_empanadas"]) else 0,
+                "fecha_inicio_venta": str(row["fecha_inicio_venta"]) if pd.notnull(row["fecha_inicio_venta"]) else None,
+                "fecha_fin_venta": str(row["fecha_fin_venta"]) if pd.notnull(row["fecha_fin_venta"]) else None,
+                "observaciones": row["observaciones"] if pd.notnull(row["observaciones"]) else None
+            }
+            conn.table("productos_v2").update(payload).eq("id", int(row["producto_id"])).execute()
+
+        clear_cache()
+        st.success("✅ Productos actualizados")
+        st.rerun()
+
+    st.divider()
+
+    with st.expander("➕ Crear producto nuevo"):
+        res_cat = conn.table("categorias_producto_v2").select("id,nombre,codigo").execute()
+        df_cat = df_from_res(res_cat)
+
+        if not df_cat.empty:
+            with st.form("nuevo_producto_form"):
+                nombre_nuevo = st.text_input("Nombre producto")
+                categoria_nueva = st.selectbox("Categoría", df_cat["nombre"].tolist())
+                activo_nuevo = st.checkbox("Activo", value=True)
+                producible_nuevo = st.checkbox("Es producible", value=False)
+                forecast_nuevo = st.checkbox("Afecta forecast", value=False)
+                visible_control_nuevo = st.checkbox("Visible en control diario", value=False)
+                visible_forecast_nuevo = st.checkbox("Visible en forecast", value=False)
+                orden_nuevo = st.number_input("Orden visual", min_value=1, step=1, value=100)
+                eq_emp_nuevo = st.number_input("Equivalente empanadas", min_value=0.0, step=1.0, value=0.0)
+                obs_nuevo = st.text_input("Observaciones")
+
+                guardar_nuevo = st.form_submit_button("Crear producto")
+
+                if guardar_nuevo and nombre_nuevo.strip():
+                    cat_row = df_cat[df_cat["nombre"] == categoria_nueva].iloc[0]
+                    payload = {
+                        "codigo": None,
+                        "nombre": nombre_nuevo.strip(),
+                        "nombre_normalizado": normalizar_nombre_py(nombre_nuevo.strip()),
+                        "categoria_id": int(cat_row["id"]),
+                        "subtipo": str(cat_row["codigo"]).lower(),
+                        "activo": activo_nuevo,
+                        "es_vendible": True,
+                        "es_producible": producible_nuevo,
+                        "afecta_forecast": forecast_nuevo,
+                        "visible_en_control_diario": visible_control_nuevo,
+                        "visible_en_forecast": visible_forecast_nuevo,
+                        "orden_visual": int(orden_nuevo),
+                        "uds_equivalentes_empanadas": float(eq_emp_nuevo),
+                        "uds_equivalentes_bebidas": 0,
+                        "observaciones": obs_nuevo if obs_nuevo else None
+                    }
+                    conn.table("productos_v2").insert(payload).execute()
+                    clear_cache()
+                    st.success("✅ Producto creado")
+                    st.rerun()
+
+# =========================================================
+# EMPLEADOS
+# =========================================================
+
+elif st.session_state.pantalla == "Empleados":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("👥 Gestión de Empleados")
+
+    with st.expander("➕ Nuevo empleado"):
+        with st.form("nuevo_empleado"):
+            nombre = st.text_input("Nombre")
+            rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
+            guardar = st.form_submit_button("Guardar empleado")
+
+            if guardar and nombre.strip():
+                payload = {
+                    "local_id": LOCAL_ID,
+                    "codigo_pos": None,
+                    "nombre": nombre.strip(),
+                    "rol": rol,
+                    "activo": True,
+                    "fecha_alta": str(datetime.date.today())
+                }
+                conn.table("empleados_v2").insert(payload).execute()
+                clear_cache()
+                st.success("✅ Empleado creado")
+                st.rerun()
+
+    res_emp = conn.table("empleados_v2").select("*").eq("local_id", LOCAL_ID).order("activo", desc=True).order("nombre").execute()
+    df_emp = df_from_res(res_emp)
+
+    if df_emp.empty:
+        st.info("No hay empleados.")
+    else:
+        for _, row in df_emp.iterrows():
+            c1, c2, c3 = st.columns([5, 2, 1])
+            c1.write(f"**{row['nombre']}**")
+            c2.write(f"{row['rol']} | {'Activo' if row['activo'] else 'Inactivo'}")
+            if row["activo"]:
+                if c3.button("Baja", key=f"baja_emp_{row['id']}"):
+                    conn.table("empleados_v2").update({
+                        "activo": False,
+                        "fecha_baja": str(datetime.date.today())
+                    }).eq("id", int(row["id"])).execute()
+                    clear_cache()
+                    st.rerun()
+
+# =========================================================
+# OPERATIVA / CONTROL DIARIO
+# =========================================================
+
+elif st.session_state.pantalla == "Operativa":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📋 Hoja de Control Diario")
+
+    col1, col2 = st.columns(2)
+    fecha_sel = col1.date_input("Fecha", value=datetime.date.today())
+
+    df_emp = cargar_empleados_activos()
+    if df_emp.empty:
+        st.error("No hay empleados activos. Crea al menos uno.")
+        st.stop()
+
+    emp_nombre = col2.selectbox("Responsable", sorted(df_emp["nombre"].tolist()))
+    empleado_id = int(df_emp[df_emp["nombre"] == emp_nombre].iloc[0]["id"])
+
+    st.subheader("Filtro de productos")
+    categorias_sel, productos_sel = filtros_categoria_producto(
+        DF_DIM,
+        key_prefix="operativa",
+        solo_activos=True,
+        solo_control=True,
+        solo_forecast=False
+    )
+
+    df_control_dim = DF_DIM.copy()
+    df_control_dim = df_control_dim[
+        (df_control_dim["activo"] == True) &
+        (df_control_dim["visible_en_control_diario"] == True)
+    ]
+
+    if categorias_sel:
+        df_control_dim = df_control_dim[df_control_dim["categoria_nombre"].isin(categorias_sel)]
+    if productos_sel:
+        df_control_dim = df_control_dim[df_control_dim["producto_nombre"].isin(productos_sel)]
+
+    df_control_dim = df_control_dim.sort_values(["categoria_nombre", "orden_visual", "producto_nombre"])
+
+    if df_control_dim.empty:
+        st.warning("No hay productos visibles en control diario con esos filtros.")
+        st.stop()
+
+    # Cargar control de hoy y resto de ayer
+    df_hoy = cargar_control_diario(fecha_sel, LOCAL_ID)
+    df_ayer = cargar_control_ayer(fecha_sel - datetime.timedelta(days=1), LOCAL_ID)
+
+    dict_hoy = {}
+    if not df_hoy.empty:
+        dict_hoy = {
+            int(r["producto_id"]): {
+                "stock_inicial": float(r["stock_inicial"]),
+                "horneados": float(r["horneados"]),
+                "merma": float(r["merma"]),
+                "resto": float(r["resto"]),
+                "incidencias": r.get("incidencias")
+            }
+            for _, r in df_hoy.iterrows()
+        }
+
+    dict_ayer = {}
+    if not df_ayer.empty:
+        dict_ayer = {
+            int(r["producto_id"]): float(r["resto"])
+            for _, r in df_ayer.iterrows()
+        }
+
+    filas = []
+    for _, p in df_control_dim.iterrows():
+        pid = int(p["producto_id"])
+        if pid in dict_hoy:
+            base = dict_hoy[pid]
+            filas.append({
+                "producto_id": pid,
+                "categoria": p["categoria_nombre"],
+                "producto": p["producto_nombre"],
+                "stock_inicial": base["stock_inicial"],
+                "horneados": base["horneados"],
+                "merma": base["merma"],
+                "resto": base["resto"],
+                "incidencias": base.get("incidencias")
+            })
+        else:
+            filas.append({
+                "producto_id": pid,
+                "categoria": p["categoria_nombre"],
+                "producto": p["producto_nombre"],
+                "stock_inicial": dict_ayer.get(pid, 0),
+                "horneados": 0,
+                "merma": 0,
+                "resto": 0,
+                "incidencias": None
+            })
+
+    df_editor = pd.DataFrame(filas)
+
+    editado = st.data_editor(
+        df_editor,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "producto_id": st.column_config.NumberColumn("ID", disabled=True),
+            "categoria": st.column_config.TextColumn("Categoría", disabled=True),
+            "producto": st.column_config.TextColumn("Producto", disabled=True),
+            "stock_inicial": st.column_config.NumberColumn("Stock inicial", step=1),
+            "horneados": st.column_config.NumberColumn("Horneados", step=1),
+            "merma": st.column_config.NumberColumn("Merma", step=1),
+            "resto": st.column_config.NumberColumn("Resto", step=1),
+            "incidencias": st.column_config.TextColumn("Incidencias")
+        }
+    )
+
+    c_h1, c_h2, c_h3 = st.columns([2, 1, 1])
+    with c_h1:
+        producto_horno = st.selectbox("Registrar hornada - Producto", df_control_dim["producto_nombre"].tolist())
+    with c_h2:
+        cantidad_horno = st.number_input("Cantidad", min_value=1, step=1, value=12)
+    with c_h3:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button("➕ Guardar hornada"):
+            pid = int(df_control_dim[df_control_dim["producto_nombre"] == producto_horno].iloc[0]["producto_id"])
+            conn.table("hornadas_eventos_v2").insert({
+                "local_id": LOCAL_ID,
+                "fecha": str(fecha_sel),
+                "fecha_hora": datetime.datetime.now().isoformat(),
+                "producto_id": pid,
+                "cantidad": cantidad_horno,
+                "empleado_id": empleado_id,
+                "notas": None
+            }).execute()
+            st.success("✅ Hornada registrada")
+            clear_cache()
+            st.rerun()
+
+    df_hornadas = cargar_hornadas_fecha(fecha_sel, LOCAL_ID)
+    if not df_hornadas.empty:
+        df_hornadas["cantidad"] = pd.to_numeric(df_hornadas["cantidad"], errors="coerce").fillna(0)
+        df_hornadas = df_hornadas.merge(
+            DF_DIM[["producto_id", "producto_nombre"]],
+            on="producto_id",
+            how="left"
+        )
+        resumen_h = df_hornadas.groupby("producto_nombre", as_index=False)["cantidad"].sum().sort_values("cantidad", ascending=False)
+        st.write("### Hornadas registradas hoy")
+        st.dataframe(resumen_h, use_container_width=True, hide_index=True)
+
+    if st.button("💾 Guardar control diario"):
+        payloads = []
+        for _, row in editado.iterrows():
+            payloads.append({
+                "local_id": LOCAL_ID,
+                "fecha": str(fecha_sel),
+                "producto_id": int(row["producto_id"]),
+                "empleado_id": empleado_id,
+                "stock_inicial": float(row["stock_inicial"]) if pd.notnull(row["stock_inicial"]) else 0,
+                "horneados": float(row["horneados"]) if pd.notnull(row["horneados"]) else 0,
+                "merma": float(row["merma"]) if pd.notnull(row["merma"]) else 0,
+                "resto": float(row["resto"]) if pd.notnull(row["resto"]) else 0,
+                "incidencias": row["incidencias"] if pd.notnull(row["incidencias"]) else None,
+                "updated_at": datetime.datetime.now().isoformat()
+            })
+
+        guardar_control_diario(payloads)
+        st.success("✅ Control diario guardado")
+        clear_cache()
+
+# =========================================================
+# BI / HISTORIAL
+# =========================================================
+
+elif st.session_state.pantalla == "BI":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📈 Historial / Business Intelligence")
+
+    col1, col2 = st.columns(2)
+    fecha_ini = col1.date_input("Desde", value=datetime.date.today() - datetime.timedelta(days=30))
+    fecha_fin = col2.date_input("Hasta", value=datetime.date.today())
+
+    st.subheader("Filtros")
+    categorias_sel, productos_sel = filtros_categoria_producto(
+        DF_DIM,
+        key_prefix="bi",
+        solo_activos=False,
+        solo_control=False,
+        solo_forecast=False
+    )
+
+    with st.spinner("Cargando ventas..."):
+        df_sales = cargar_ventas_rango(fecha_ini, fecha_fin)
+
+    if df_sales.empty:
+        st.warning("No hay ventas en ese rango.")
+        st.stop()
+
+    df_sales = aplicar_filtros_df(df_sales, DF_DIM, categorias_sel, productos_sel)
+
+    if df_sales.empty:
+        st.warning("No hay datos tras aplicar filtros.")
+        st.stop()
+
+    total_ventas = df_sales["neto"].sum()
+    total_uds = df_sales["uds_v"].sum()
+    total_tickets = df_sales["ticket_uid"].nunique()
+    ticket_medio = total_ventas / total_tickets if total_tickets else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Ventas netas", f"{total_ventas:,.2f} €")
+    c2.metric("Unidades", f"{total_uds:,.0f}")
+    c3.metric("Tickets", f"{total_tickets:,.0f}")
+    c4.metric("Ticket medio", f"{ticket_medio:,.2f} €")
+
+    st.divider()
+
+    # Ventas por día
+    df_day = df_sales.groupby("fecha", as_index=False).agg(
+        ventas=("neto", "sum"),
+        unidades=("uds_v", "sum"),
+        tickets=("ticket_uid", "nunique")
+    )
+
+    fig_day = px.line(df_day, x="fecha", y="ventas", title="Ventas por día")
+    st.plotly_chart(fig_day, use_container_width=True)
+
+    # Top productos
+    df_prod = df_sales.groupby(["producto_nombre", "categoria_nombre"], as_index=False).agg(
+        ventas=("neto", "sum"),
+        unidades=("uds_v", "sum")
+    ).sort_values("ventas", ascending=False).head(20)
+
+    col_g1, col_g2 = st.columns(2)
+
+    with col_g1:
+        fig_top = px.bar(df_prod, x="producto_nombre", y="ventas", color="categoria_nombre", title="Top productos por ventas")
+        st.plotly_chart(fig_top, use_container_width=True)
+
+    with col_g2:
+        df_hour = df_sales.copy()
+        df_hour["hora_num"] = pd.to_datetime(df_hour["hora"], format="%H:%M:%S", errors="coerce").dt.hour
+        df_hour = df_hour.groupby("hora_num", as_index=False).agg(
+            ventas=("neto", "sum"),
+            unidades=("uds_v", "sum")
+        ).sort_values("hora_num")
+        fig_hour = px.bar(df_hour, x="hora_num", y="ventas", title="Ventas por hora")
+        st.plotly_chart(fig_hour, use_container_width=True)
+
+    st.write("### Detalle por producto")
+    st.dataframe(df_prod, use_container_width=True, hide_index=True)
+
+# =========================================================
+# FORECAST
+# =========================================================
+
+elif st.session_state.pantalla == "Forecast":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("🧠 Forecast de Horneado")
+
+    c1, c2, c3 = st.columns(3)
+    fecha_pred = c1.date_input("Fecha objetivo", datetime.date.today())
+    estrategia = c2.select_slider(
+        "Estrategia",
+        options=["Defensiva", "Equilibrada", "Agresiva"],
+        value="Equilibrada"
+    )
+    es_festivo = c3.toggle("Festivo / Puente", value=False)
+
+    st.subheader("Filtro de productos")
+    categorias_sel, productos_sel = filtros_categoria_producto(
+        DF_DIM,
+        key_prefix="forecast",
+        solo_activos=True,
+        solo_control=False,
+        solo_forecast=True
+    )
+
+    if st.button("🚀 Calcular forecast"):
+        df_forecast_dim = DF_DIM.copy()
+        df_forecast_dim = df_forecast_dim[
+            (df_forecast_dim["activo"] == True) &
+            (df_forecast_dim["visible_en_forecast"] == True) &
+            (df_forecast_dim["afecta_forecast"] == True)
+        ]
+
+        if categorias_sel:
+            df_forecast_dim = df_forecast_dim[df_forecast_dim["categoria_nombre"].isin(categorias_sel)]
+        if productos_sel:
+            df_forecast_dim = df_forecast_dim[df_forecast_dim["producto_nombre"].isin(productos_sel)]
+
+        if df_forecast_dim.empty:
+            st.warning("No hay productos visibles en forecast con esos filtros.")
+            st.stop()
+
+        fecha_ini = fecha_pred - datetime.timedelta(days=365)
+
+        with st.spinner("Analizando histórico..."):
+            df_sales = cargar_ventas_rango(fecha_ini, fecha_pred - datetime.timedelta(days=1))
+
+        if df_sales.empty:
+            st.warning("No hay histórico suficiente.")
+            st.stop()
+
+        df_sales = df_sales.merge(
+            df_forecast_dim[["producto_id", "producto_nombre"]],
+            on="producto_id",
+            how="inner"
+        )
+
+        if df_sales.empty:
+            st.warning("No hay ventas históricas para esos productos.")
+            st.stop()
+
+        df_daily = df_sales.groupby(["fecha", "producto_id", "producto_nombre"], as_index=False)["uds_v"].sum()
+        df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
+        objetivo_dow = fecha_pred.weekday()
+
+        pct_map = {
+            "Defensiva": 50,
+            "Equilibrada": 75,
+            "Agresiva": 88
+        }
+        pct = pct_map[estrategia]
+
+        resultados = []
+        for _, p in df_forecast_dim.iterrows():
+            pid = p["producto_id"]
+            nombre = p["producto_nombre"]
+
+            sub = df_daily[df_daily["producto_id"] == pid].copy()
+            sub["dow"] = sub["fecha"].dt.weekday
+            hist = sub[sub["dow"] == objetivo_dow]["uds_v"]
+
+            if hist.empty:
+                base = sub["uds_v"].mean() if not sub.empty else 0
+            else:
+                base = np.percentile(hist, pct)
+
+            if es_festivo:
+                base *= 1.15
+
+            if estrategia == "Agresiva":
+                base *= 1.05
+
+            total = int(np.ceil(base))
+            if total > 0:
+                resultados.append({
+                    "Producto": nombre,
+                    "Total sugerido": total,
+                    "Tanda 1": int(np.ceil(total * 0.7)),
+                    "Tanda 2": int(np.floor(total * 0.3))
+                })
+
+        if not resultados:
+            st.warning("No pude generar forecast.")
+            st.stop()
+
+        df_res = pd.DataFrame(resultados).sort_values("Total sugerido", ascending=False)
+
+        st.success(f"✅ Forecast generado | Total sugerido: {df_res['Total sugerido'].sum()} uds")
+        st.dataframe(df_res, use_container_width=True, hide_index=True)
+
+        txt = f"*PLAN DE HORNEADO - {fecha_pred.strftime('%d/%m/%Y')}*\n"
+        txt += f"Estrategia: {estrategia} | Festivo: {'Sí' if es_festivo else 'No'}\n"
+        txt += "-" * 25 + "\n"
+        for _, r in df_res.iterrows():
+            txt += f"• {r['Producto']}: {r['Tanda 1']} + {r['Tanda 2']} = *{r['Total sugerido']}*\n"
+
+        st.text_area("Texto para WhatsApp", txt, height=300)
+
+# =========================================================
+# PENDIENTES
+# =========================================================
+
+elif st.session_state.pantalla == "Pendientes":
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("🧩 Artículos pendientes de mapear")
+
+    res_pend = conn.table("articulos_pendientes_v2").select("*").eq("estado", "pendiente").order("veces_detectado", desc=True).execute()
+    df_pend = df_from_res(res_pend)
+
+    if df_pend.empty:
+        st.success("✅ No quedan pendientes.")
+        st.stop()
+
+    st.dataframe(
+        df_pend[["articulo_raw_ejemplo", "alias_normalizado", "veces_detectado", "primera_fecha", "ultima_fecha"]],
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.divider()
+    st.subheader("Resolver un pendiente")
+
+    alias_sel = st.selectbox(
+        "Alias pendiente",
+        df_pend["alias_normalizado"].tolist()
+    )
+
+    df_match = df_pend[df_pend["alias_normalizado"] == alias_sel].iloc[0]
+    st.write(f"**Ejemplo raw:** {df_match['articulo_raw_ejemplo']}")
+    st.write(f"**Veces detectado:** {df_match['veces_detectado']}")
+
+    nombres_producto = sorted(DF_DIM["producto_nombre"].dropna().unique().tolist())
+    producto_destino = st.selectbox("Mapear a producto existente", nombres_producto)
+
+    c1, c2 = st.columns(2)
+
+    if c1.button("✅ Resolver pendiente"):
+        pid = int(DF_DIM[DF_DIM["producto_nombre"] == producto_destino].iloc[0]["producto_id"])
+        now_iso = datetime.datetime.now().isoformat()
+
+        conn.table("producto_aliases_v2").upsert({
+            "alias_raw": df_match["articulo_raw_ejemplo"],
+            "alias_normalizado": alias_sel,
+            "producto_id": pid,
+            "fuente": "manual_streamlit",
+            "confianza": 1.0,
+            "activo": True
+        }, on_conflict="alias_normalizado").execute()
+
+        conn.table("ventas_staging_v2").update({
+            "producto_id": pid,
+            "estado_mapeo": "mapeado"
+        }).eq("articulo_normalizado", alias_sel).eq("estado_mapeo", "pendiente").execute()
+
+        conn.table("articulos_pendientes_v2").update({
+            "estado": "resuelto",
+            "producto_id_sugerido": pid,
+            "updated_at": now_iso
+        }).eq("alias_normalizado", alias_sel).execute()
+
+        clear_cache()
+        st.success("✅ Pendiente resuelto")
+        st.rerun()
+
+    if c2.button("🚫 Marcar como descartado"):
+        conn.table("articulos_pendientes_v2").update({
+            "estado": "descartado",
+            "notas": "Descartado manualmente desde Streamlit",
+            "updated_at": datetime.datetime.now().isoformat()
+        }).eq("alias_normalizado", alias_sel).execute()
+
+        clear_cache()
+        st.success("✅ Pendiente descartado")
+        st.rerun()
