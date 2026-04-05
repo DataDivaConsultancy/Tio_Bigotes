@@ -93,8 +93,15 @@ def clear_cache() -> None:
 
 
 
+def _is_na(v: Any) -> bool:
+    try:
+        return pd.isna(v)
+    except (ValueError, TypeError):
+        return False
+
+
 def safe_bool(v: Any) -> bool:
-    if pd.isna(v):
+    if _is_na(v):
         return False
     return bool(v)
 
@@ -102,7 +109,7 @@ def safe_bool(v: Any) -> bool:
 
 def safe_int(v: Any, default: int = 0) -> int:
     try:
-        if pd.isna(v):
+        if _is_na(v):
             return default
         return int(v)
     except Exception:
@@ -112,7 +119,7 @@ def safe_int(v: Any, default: int = 0) -> int:
 
 def safe_float(v: Any, default: float = 0.0) -> float:
     try:
-        if pd.isna(v):
+        if _is_na(v):
             return default
         return float(v)
     except Exception:
@@ -122,7 +129,7 @@ def safe_float(v: Any, default: float = 0.0) -> float:
 
 def safe_date_iso(v: Any) -> Optional[str]:
     try:
-        if pd.isna(v):
+        if _is_na(v):
             return None
         return pd.to_datetime(v).date().isoformat()
     except Exception:
@@ -130,10 +137,11 @@ def safe_date_iso(v: Any) -> Optional[str]:
 
 
 
-def rpc_call(name: str, params: Optional[Dict[str, Any]] = None) -> Any:
+def rpc_call(name: str, params: Optional[Dict[str, Any]] = None, retries: int = 3) -> Any:
     """
     Llama a una función Postgres expuesta por Supabase vía REST:
     POST /rest/v1/rpc/<function_name>
+    Reintenta automáticamente en errores transitorios (502, gateway, etc.).
     """
     base_url = st.secrets["connections"]["supabase"]["url"].rstrip("/")
     api_key = st.secrets["connections"]["supabase"]["key"]
@@ -146,24 +154,42 @@ def rpc_call(name: str, params: Optional[Dict[str, Any]] = None) -> Any:
         "Content-Type": "application/json",
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json=params or {},
-        timeout=30,
-    )
+    last_exc: Optional[Exception] = None
 
-    if not response.ok:
+    for attempt in range(retries):
         try:
-            detail = response.json()
-        except Exception:
-            detail = response.text
-        raise RuntimeError(f"RPC {name} falló: {detail}")
+            response = requests.post(
+                url,
+                headers=headers,
+                json=params or {},
+                timeout=30,
+            )
 
-    try:
-        return response.json()
-    except Exception:
-        return None
+            if not response.ok:
+                try:
+                    detail = response.json()
+                except Exception:
+                    detail = response.text
+                exc = RuntimeError(f"RPC {name} falló: {detail}")
+                if attempt < retries - 1 and _is_transient_supabase_error(exc):
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise exc
+
+            try:
+                return response.json()
+            except Exception:
+                return None
+        except requests.exceptions.ConnectionError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+    return None
 
 
 
@@ -184,7 +210,7 @@ def detectar_csv(file_bytes: bytes) -> Tuple[str, str, str]:
 
     muestra = text[:5000]
     try:
-        dialect = csv.Sniffer().sniff(muestra, delimiters=";,|\t,")
+        dialect = csv.Sniffer().sniff(muestra, delimiters=";,\t|")
         sep = dialect.delimiter
     except Exception:
         sep = ";"
@@ -251,10 +277,11 @@ def _is_transient_supabase_error(exc: Exception) -> bool:
 
 
 
-def _query_existing_line_uids_chunk(sub: List[str]) -> List[Dict[str, Any]]:
+def _query_existing_line_uids_chunk(sub: List[str], _depth: int = 0) -> List[Dict[str, Any]]:
     """
     Hace consultas pequeñas y, si Supabase devuelve 502/transient error,
     reintenta y divide el bloque en trozos aún más pequeños.
+    Máximo 4 niveles de recursión para evitar bucles infinitos.
     """
     if not sub:
         return []
@@ -277,9 +304,12 @@ def _query_existing_line_uids_chunk(sub: List[str]) -> List[Dict[str, Any]]:
                 continue
             break
 
-    if len(sub) > 10:
+    if len(sub) > 10 and _depth < 4:
         mid = len(sub) // 2
-        return _query_existing_line_uids_chunk(sub[:mid]) + _query_existing_line_uids_chunk(sub[mid:])
+        return (
+            _query_existing_line_uids_chunk(sub[:mid], _depth + 1)
+            + _query_existing_line_uids_chunk(sub[mid:], _depth + 1)
+        )
 
     if last_exc is not None:
         raise last_exc
@@ -633,8 +663,10 @@ def aplicar_filtros_df(
         "fecha_fin_venta",
     ]
     dim_cols = [c for c in dim_cols if c in df_dim.columns]
+    # Evitar columnas duplicadas al hacer merge
+    cols_to_add = [c for c in dim_cols if c not in df.columns or c == "producto_id"]
 
-    out = df.merge(df_dim[dim_cols], on="producto_id", how="left")
+    out = df.merge(df_dim[cols_to_add], on="producto_id", how="left")
 
     if categorias_sel:
         out = out[out["categoria_nombre"].isin(categorias_sel)]
@@ -872,34 +904,44 @@ elif st.session_state.pantalla == "Productos":
     )
 
     if st.button("💾 Guardar cambios de productos"):
+        _save_ok = False
         try:
-            for _, row in editado.iterrows():
-                rpc_call(
-                    "rpc_actualizar_producto",
-                    {
-                        "p_id": int(row["producto_id"]),
-                        "p_activo": safe_bool(row["activo"]),
-                        "p_es_producible": safe_bool(row["es_producible"]),
-                        "p_afecta_forecast": safe_bool(row["afecta_forecast"]),
-                        "p_visible_en_control_diario": safe_bool(row["visible_en_control_diario"]),
-                        "p_visible_en_forecast": safe_bool(row["visible_en_forecast"]),
-                        "p_orden_visual": safe_int(row["orden_visual"], 100),
-                        "p_uds_equivalentes_empanadas": safe_float(
-                            row["uds_equivalentes_empanadas"], 0
-                        ),
-                        "p_fecha_inicio_venta": safe_date_iso(row["fecha_inicio_venta"]),
-                        "p_fecha_fin_venta": safe_date_iso(row["fecha_fin_venta"]),
-                        "p_observaciones": row["observaciones"]
-                        if pd.notnull(row["observaciones"])
-                        else None,
-                    },
-                )
+            # Solo enviar filas que el usuario realmente cambió
+            df_changed = editado.loc[
+                ~editado.apply(lambda r: r.equals(df_edit.loc[r.name]), axis=1)
+            ] if not df_edit.empty else editado
 
-            clear_cache()
-            st.success("✅ Productos actualizados")
-            st.rerun()
+            if df_changed.empty:
+                st.info("No hay cambios que guardar.")
+            else:
+                for _, row in df_changed.iterrows():
+                    rpc_call(
+                        "rpc_actualizar_producto",
+                        {
+                            "p_id": int(row["producto_id"]),
+                            "p_activo": safe_bool(row["activo"]),
+                            "p_es_producible": safe_bool(row["es_producible"]),
+                            "p_afecta_forecast": safe_bool(row["afecta_forecast"]),
+                            "p_visible_en_control_diario": safe_bool(row["visible_en_control_diario"]),
+                            "p_visible_en_forecast": safe_bool(row["visible_en_forecast"]),
+                            "p_orden_visual": safe_int(row["orden_visual"], 100),
+                            "p_uds_equivalentes_empanadas": safe_float(
+                                row["uds_equivalentes_empanadas"], 0
+                            ),
+                            "p_fecha_inicio_venta": safe_date_iso(row["fecha_inicio_venta"]),
+                            "p_fecha_fin_venta": safe_date_iso(row["fecha_fin_venta"]),
+                            "p_observaciones": row["observaciones"]
+                            if pd.notnull(row["observaciones"])
+                            else None,
+                        },
+                    )
+
+                clear_cache()
+                _save_ok = True
         except Exception as e:
             st.error(f"Error guardando productos: {e}")
+        if _save_ok:
+            st.rerun()
 
     st.divider()
 
@@ -924,6 +966,7 @@ elif st.session_state.pantalla == "Productos":
 
                 guardar_nuevo = st.form_submit_button("Crear producto")
 
+                _create_ok = False
                 if guardar_nuevo and nombre_nuevo.strip():
                     try:
                         cat_row = df_cat[df_cat["nombre"] == categoria_nueva].iloc[0]
@@ -948,10 +991,11 @@ elif st.session_state.pantalla == "Productos":
                         )
 
                         clear_cache()
-                        st.success("✅ Producto creado")
-                        st.rerun()
+                        _create_ok = True
                     except Exception as e:
                         st.error(f"Error creando producto: {e}")
+                if _create_ok:
+                    st.rerun()
 
 
 # =========================================================
@@ -968,6 +1012,7 @@ elif st.session_state.pantalla == "Empleados":
             rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
             guardar = st.form_submit_button("Guardar empleado")
 
+            _emp_ok = False
             if guardar and nombre.strip():
                 try:
                     rpc_call(
@@ -981,10 +1026,11 @@ elif st.session_state.pantalla == "Empleados":
                         },
                     )
                     clear_cache()
-                    st.success("✅ Empleado creado")
-                    st.rerun()
+                    _emp_ok = True
                 except Exception as e:
                     st.error(f"Error creando empleado: {e}")
+            if _emp_ok:
+                st.rerun()
 
     res_emp = (
         conn.table("empleados_v2")
@@ -1006,6 +1052,7 @@ elif st.session_state.pantalla == "Empleados":
 
             if row["activo"]:
                 if c3.button("Baja", key=f"baja_emp_{row['id']}"):
+                    _baja_ok = False
                     try:
                         rpc_call(
                             "rpc_baja_empleado",
@@ -1015,10 +1062,11 @@ elif st.session_state.pantalla == "Empleados":
                             },
                         )
                         clear_cache()
-                        st.success("✅ Empleado dado de baja")
-                        st.rerun()
+                        _baja_ok = True
                     except Exception as e:
                         st.error(f"Error dando de baja: {e}")
+                    if _baja_ok:
+                        st.rerun()
 
 
 # =========================================================
@@ -1149,6 +1197,7 @@ elif st.session_state.pantalla == "Operativa":
     with c_h3:
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if st.button("➕ Guardar hornada"):
+            _hornada_ok = False
             try:
                 pid = int(
                     df_control_dim[df_control_dim["producto_nombre"] == producto_horno].iloc[0][
@@ -1168,10 +1217,11 @@ elif st.session_state.pantalla == "Operativa":
                     },
                 )
                 clear_cache()
-                st.success("✅ Hornada registrada")
-                st.rerun()
+                _hornada_ok = True
             except Exception as e:
                 st.error(f"Error registrando hornada: {e}")
+            if _hornada_ok:
+                st.rerun()
 
     df_hornadas = cargar_hornadas_fecha(fecha_sel, LOCAL_ID)
     if not df_hornadas.empty:
@@ -1504,6 +1554,7 @@ elif st.session_state.pantalla == "Pendientes":
     c1, c2 = st.columns(2)
 
     if c1.button("✅ Resolver pendiente"):
+        _resolver_ok = False
         try:
             pid = int(DF_DIM[DF_DIM["producto_nombre"] == producto_destino].iloc[0]["producto_id"])
 
@@ -1517,12 +1568,14 @@ elif st.session_state.pantalla == "Pendientes":
             )
 
             clear_cache()
-            st.success("✅ Pendiente resuelto")
-            st.rerun()
+            _resolver_ok = True
         except Exception as e:
             st.error(f"Error resolviendo pendiente: {e}")
+        if _resolver_ok:
+            st.rerun()
 
     if c2.button("🚫 Marcar como descartado"):
+        _descartar_ok = False
         try:
             rpc_call(
                 "rpc_descartar_pendiente",
@@ -1533,10 +1586,11 @@ elif st.session_state.pantalla == "Pendientes":
             )
 
             clear_cache()
-            st.success("✅ Pendiente descartado")
-            st.rerun()
+            _descartar_ok = True
         except Exception as e:
             st.error(f"Error descartando pendiente: {e}")
+        if _descartar_ok:
+            st.rerun()
 
 
 # =========================================================
@@ -1658,7 +1712,6 @@ elif st.session_state.pantalla == "CargaVentas":
                     "sep": sep_detectado,
                     "encoding": encoding_detectado,
                     "file_name": archivo.name,
-                    "file_bytes": file_bytes,
                     "resumen": resumen,
                 }
 
@@ -1715,7 +1768,7 @@ elif st.session_state.pantalla == "CargaVentas":
 
                     with st.spinner("Subiendo..."):
                         for chunk in iter_csv_chunks(
-                            analisis["file_bytes"],
+                            file_bytes,
                             sep=analisis["sep"],
                             encoding=analisis["encoding"],
                             chunksize=5000,
