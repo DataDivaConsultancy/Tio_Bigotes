@@ -1,7 +1,3 @@
-import csv
-import io
-import hashlib
-import requests
 import streamlit as st
 import pandas as pd
 from st_supabase_connection import SupabaseConnection, execute_query
@@ -10,6 +6,11 @@ import re
 import unicodedata
 import plotly.express as px
 import numpy as np
+import requests
+import csv
+import io
+import hashlib
+
 
 
 # =========================================================
@@ -369,6 +370,225 @@ def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping
         return response.json()
     except Exception:
         return None
+
+def detectar_csv(file_bytes: bytes):
+    encoding = "utf-8-sig"
+    text = None
+
+    for enc in ["utf-8-sig", "utf-8", "latin-1"]:
+        try:
+            text = file_bytes.decode(enc)
+            encoding = enc
+            break
+        except Exception:
+            continue
+
+    if text is None:
+        raise ValueError("No pude decodificar el archivo CSV.")
+
+    muestra = text[:5000]
+    try:
+        dialect = csv.Sniffer().sniff(muestra, delimiters=";,|\t,")
+        sep = dialect.delimiter
+    except Exception:
+        sep = ";"
+
+    return text, encoding, sep
+
+
+def leer_csv_preview(file_bytes: bytes, nrows=200):
+    text, encoding, sep = detectar_csv(file_bytes)
+    df = pd.read_csv(io.StringIO(text), sep=sep, nrows=nrows)
+    return df, encoding, sep
+
+
+def iter_csv_chunks(file_bytes: bytes, sep: str, encoding: str, chunksize=20000):
+    text = file_bytes.decode(encoding)
+    buffer = io.StringIO(text)
+    for chunk in pd.read_csv(buffer, sep=sep, chunksize=chunksize):
+        yield chunk
+
+
+def cargar_mapeo_guardado():
+    res = conn.table("config_importaciones_v2").select("*").eq("import_type", "ventas_diarias").execute()
+    df = df_from_res(res)
+    if df.empty:
+        return {}, None, None
+
+    row = df.iloc[0]
+    mapping = row["mapping"] if isinstance(row["mapping"], dict) else {}
+    return mapping, row.get("separator"), row.get("encoding")
+
+
+def rpc_scalar(resp, key=None):
+    if isinstance(resp, list):
+        if not resp:
+            return None
+        if key and isinstance(resp[0], dict) and key in resp[0]:
+            return resp[0][key]
+        return resp[0]
+    if isinstance(resp, dict):
+        if key and key in resp:
+            return resp[key]
+        return resp
+    return resp
+
+
+def fetch_existing_by_ticket_uids(ticket_uids):
+    if not ticket_uids:
+        return {}
+
+    out = {}
+    lote = 500
+
+    for i in range(0, len(ticket_uids), lote):
+        sub = ticket_uids[i:i+lote]
+        resp = rpc_call("rpc_fetch_existing_sales_for_tickets", {
+            "p_ticket_uids": sub
+        })
+
+        if isinstance(resp, list):
+            for r in resp:
+                out[r["line_uid"]] = {
+                    "id": r["id"],
+                    "payload_hash": r["payload_hash"]
+                }
+
+    return out
+
+
+def prepare_rows_chunk(df_chunk, mapping, file_name, start_row_num, ticket_state):
+    def val(row, key, default=""):
+        src = mapping.get(key)
+        if not src or src not in row.index:
+            return default
+        v = row[src]
+        if pd.isna(v):
+            return default
+        return str(v).strip()
+
+    rows = []
+    row_num = start_row_num
+
+    for _, row in df_chunk.iterrows():
+        row_num += 1
+
+        fecha_raw = val(row, "fecha")
+        hora_raw = val(row, "hora")
+        serie_numero_raw = val(row, "serie_numero")
+        establecimiento_raw = val(row, "establecimiento")
+        caja_raw = val(row, "caja")
+        numero_raw = val(row, "numero")
+        cliente_raw = val(row, "cliente")
+        empleado_raw = val(row, "empleado")
+        uds_v_raw = val(row, "uds_v")
+        articulo_raw = val(row, "articulo")
+        subarticulo_raw = val(row, "subarticulo")
+        base_raw = val(row, "base")
+        impuestos_raw = val(row, "impuestos")
+        dto_total_raw = val(row, "dto_total")
+        neto_raw = val(row, "neto")
+        column1 = val(row, "column1")
+
+        ticket_uid_raw = " | ".join([
+            fecha_raw,
+            establecimiento_raw,
+            caja_raw,
+            serie_numero_raw
+        ])
+
+        line_idx = ticket_state.get(ticket_uid_raw, 0) + 1
+        ticket_state[ticket_uid_raw] = line_idx
+
+        line_uid = hashlib.md5(f"{ticket_uid_raw}|{line_idx}".encode("utf-8")).hexdigest()
+
+        payload_string = "|".join([
+            hora_raw,
+            numero_raw,
+            cliente_raw,
+            empleado_raw,
+            articulo_raw,
+            subarticulo_raw,
+            uds_v_raw,
+            base_raw,
+            impuestos_raw,
+            dto_total_raw,
+            neto_raw
+        ])
+        payload_hash = hashlib.md5(payload_string.encode("utf-8")).hexdigest()
+
+        rows.append({
+            "existing_id": None,
+            "source_file_name": file_name,
+            "source_row_num": row_num,
+            "row_num": row_num,
+            "column1": column1,
+            "fecha_raw": fecha_raw,
+            "hora_raw": hora_raw,
+            "serie_numero_raw": serie_numero_raw,
+            "establecimiento_raw": establecimiento_raw,
+            "caja_raw": caja_raw,
+            "numero_raw": numero_raw,
+            "cliente_raw": cliente_raw,
+            "empleado_raw": empleado_raw,
+            "uds_v_raw": uds_v_raw,
+            "articulo_raw": articulo_raw,
+            "subarticulo_raw": subarticulo_raw,
+            "base_raw": base_raw,
+            "impuestos_raw": impuestos_raw,
+            "dto_total_raw": dto_total_raw,
+            "neto_raw": neto_raw,
+            "ticket_uid_raw": ticket_uid_raw,
+            "line_idx_in_ticket": line_idx,
+            "line_uid": line_uid,
+            "payload_hash": payload_hash,
+        })
+
+    return rows, row_num, ticket_state
+
+
+def analizar_csv_incremental(file_bytes: bytes, sep: str, encoding: str, mapping: dict, file_name: str):
+    total_fisicas = 0
+    total_unicas = 0
+    total_nuevas = 0
+    total_modificadas = 0
+    total_iguales = 0
+
+    ticket_state = {}
+    current_row_num = 0
+
+    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=20000):
+        total_fisicas += len(chunk)
+
+        rows, current_row_num, ticket_state = prepare_rows_chunk(
+            chunk, mapping, file_name, current_row_num, ticket_state
+        )
+
+        if not rows:
+            continue
+
+        df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
+        total_unicas += len(df_rows)
+
+        existing_map = fetch_existing_by_ticket_uids(df_rows["ticket_uid_raw"].drop_duplicates().tolist())
+
+        for _, r in df_rows.iterrows():
+            old = existing_map.get(r["line_uid"])
+            if old is None:
+                total_nuevas += 1
+            elif old["payload_hash"] != r["payload_hash"]:
+                total_modificadas += 1
+            else:
+                total_iguales += 1
+
+    return {
+        "total_fisicas": total_fisicas,
+        "total_unicas": total_unicas,
+        "nuevas": total_nuevas,
+        "modificadas": total_modificadas,
+        "iguales": total_iguales,
+        "a_subir": total_nuevas + total_modificadas
+    }
 
 
 @st.cache_data(ttl=60)
