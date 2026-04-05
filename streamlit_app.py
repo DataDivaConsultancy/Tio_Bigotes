@@ -236,23 +236,33 @@ def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
 
 
 
-def fetch_existing_by_ticket_uids(ticket_uids: List[str]) -> Dict[str, Dict[str, Any]]:
-    if not ticket_uids:
+def fetch_existing_by_line_uids(line_uids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Busca únicamente las líneas exactas que podrían existir ya en ventas_raw_v2.
+    Esto evita la RPC por ticket completo, que puede hacer scans muy costosos
+    y acabar en statement timeout cuando el CSV trae muchos tickets.
+    """
+    if not line_uids:
         return {}
 
     out: Dict[str, Dict[str, Any]] = {}
-    lote = 500
+    lote = 120
+    unique_line_uids = list(dict.fromkeys(line_uids))
 
-    for i in range(0, len(ticket_uids), lote):
-        sub = ticket_uids[i : i + lote]
-        resp = rpc_call("rpc_fetch_existing_sales_for_tickets", {"p_ticket_uids": sub})
+    for i in range(0, len(unique_line_uids), lote):
+        sub = unique_line_uids[i : i + lote]
+        res = (
+            conn.table("ventas_raw_v2")
+            .select("id,line_uid,payload_hash")
+            .in_("line_uid", sub)
+            .execute()
+        )
 
-        if isinstance(resp, list):
-            for r in resp:
-                out[r["line_uid"]] = {
-                    "id": r["id"],
-                    "payload_hash": r["payload_hash"],
-                }
+        for r in (res.data or []):
+            out[r["line_uid"]] = {
+                "id": r["id"],
+                "payload_hash": r.get("payload_hash"),
+            }
 
     return out
 
@@ -372,7 +382,7 @@ def analizar_csv_incremental(
     ticket_state: Dict[str, int] = {}
     current_row_num = 0
 
-    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=20000):
+    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=5000):
         total_fisicas += len(chunk)
 
         rows, current_row_num, ticket_state = prepare_rows_chunk(
@@ -385,9 +395,7 @@ def analizar_csv_incremental(
         df_rows = pd.DataFrame(rows).drop_duplicates(subset=["line_uid"], keep="last")
         total_unicas += len(df_rows)
 
-        existing_map = fetch_existing_by_ticket_uids(
-            df_rows["ticket_uid_raw"].drop_duplicates().tolist()
-        )
+        existing_map = fetch_existing_by_line_uids(df_rows["line_uid"].tolist())
 
         for _, r in df_rows.iterrows():
             old = existing_map.get(r["line_uid"])
@@ -1664,7 +1672,7 @@ elif st.session_state.pantalla == "CargaVentas":
                             analisis["file_bytes"],
                             sep=analisis["sep"],
                             encoding=analisis["encoding"],
-                            chunksize=20000,
+                            chunksize=5000,
                         ):
                             total_fisicas += len(chunk)
 
@@ -1684,9 +1692,7 @@ elif st.session_state.pantalla == "CargaVentas":
                             )
                             total_unicas += len(df_rows)
 
-                            existing_map = fetch_existing_by_ticket_uids(
-                                df_rows["ticket_uid_raw"].drop_duplicates().tolist()
-                            )
+                            existing_map = fetch_existing_by_line_uids(df_rows["line_uid"].tolist())
 
                             rows_to_write: List[Dict[str, Any]] = []
 
