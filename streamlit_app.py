@@ -3,8 +3,11 @@ import csv
 import hashlib
 import io
 import re
+import secrets
+import string
 import time
 import unicodedata
+import urllib.parse
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -783,16 +786,265 @@ def guardar_control_diario(payloads: List[Dict[str, Any]]) -> None:
 
 
 # =========================================================
+# AUTENTICACIÓN
+# =========================================================
+
+TODAS_LAS_PANTALLAS = [
+    "Productos",
+    "Empleados",
+    "Operativa",
+    "BI",
+    "Forecast",
+    "Pendientes",
+    "CargaVentas",
+]
+
+PANTALLA_LABELS = {
+    "Productos": "Productos",
+    "Empleados": "Empleados",
+    "Operativa": "Control Diario",
+    "BI": "Historial / BI",
+    "Forecast": "Forecast",
+    "Pendientes": "Pendientes",
+    "CargaVentas": "Subir CSV Ventas",
+}
+
+
+def hash_password(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode("utf-8")).hexdigest()
+
+
+def generar_password_temporal() -> str:
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(10))
+
+
+def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str) -> str:
+    msg = (
+        f"Hola {nombre}! Tu cuenta en Tío Bigotes ha sido creada.\n\n"
+        f"Email: {email}\n"
+        f"Contraseña temporal: {password}\n\n"
+        f"Deberás cambiarla en tu primer inicio de sesión."
+    )
+    phone = re.sub(r"[^\d+]", "", telefono)
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+    return f"https://wa.me/{phone.lstrip('+')}?text={urllib.parse.quote(msg)}"
+
+
+def get_user() -> Optional[Dict[str, Any]]:
+    return st.session_state.get("auth_user")
+
+
+def is_superadmin() -> bool:
+    user = get_user()
+    return user is not None and user.get("rol") == "superadmin"
+
+
+def user_has_access(pantalla: str) -> bool:
+    user = get_user()
+    if not user:
+        return False
+    if user.get("rol") == "superadmin":
+        return True
+    permisos = user.get("permisos") or []
+    return pantalla in permisos
+
+
+def cerrar_sesion() -> None:
+    st.session_state.pop("auth_user", None)
+    st.session_state.pantalla = "Login"
+
+
+def pantalla_login() -> None:
+    st.title("🥐 Tío Bigotes")
+    st.subheader("Iniciar sesión")
+
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Contraseña", type="password")
+        submit = st.form_submit_button("Entrar")
+
+    col_forgot, _ = st.columns([1, 2])
+    with col_forgot:
+        if st.button("Olvidé mi contraseña"):
+            st.session_state.pantalla = "RecuperarPassword"
+            st.rerun()
+
+    if submit and email.strip() and password:
+        try:
+            resp = rpc_call(
+                "rpc_verificar_login",
+                {"p_email": email.strip().lower(), "p_password_hash": hash_password(password)},
+            )
+            result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
+
+            if result.get("ok"):
+                st.session_state["auth_user"] = {
+                    "id": result["id"],
+                    "nombre": result["nombre"],
+                    "email": result["email"],
+                    "telefono": result.get("telefono"),
+                    "rol": result["rol"],
+                    "must_change_password": result.get("must_change_password", False),
+                    "permisos": result.get("permisos") or [],
+                    "local_id": result.get("local_id"),
+                }
+                if result.get("must_change_password"):
+                    st.session_state.pantalla = "CambiarPassword"
+                else:
+                    st.session_state.pantalla = "Home"
+                st.rerun()
+            else:
+                st.error(result.get("error", "Error de autenticación"))
+        except Exception as e:
+            st.error(f"Error conectando: {e}")
+
+
+def pantalla_cambiar_password(forzado: bool = False) -> None:
+    user = get_user()
+    if not user:
+        st.session_state.pantalla = "Login"
+        st.rerun()
+        return
+
+    st.title("🔐 Cambiar contraseña")
+    if forzado:
+        st.warning("Debes cambiar tu contraseña antes de continuar.")
+
+    with st.form("cambiar_pwd_form"):
+        old_pwd = st.text_input("Contraseña actual", type="password")
+        new_pwd = st.text_input("Nueva contraseña", type="password")
+        confirm_pwd = st.text_input("Confirmar nueva contraseña", type="password")
+        submit = st.form_submit_button("Cambiar contraseña")
+
+    if submit:
+        if not old_pwd or not new_pwd:
+            st.error("Completa todos los campos.")
+        elif new_pwd != confirm_pwd:
+            st.error("Las contraseñas no coinciden.")
+        elif len(new_pwd) < 6:
+            st.error("La contraseña debe tener al menos 6 caracteres.")
+        else:
+            try:
+                resp = rpc_call(
+                    "rpc_cambiar_password",
+                    {
+                        "p_user_id": user["id"],
+                        "p_old_hash": hash_password(old_pwd),
+                        "p_new_hash": hash_password(new_pwd),
+                    },
+                )
+                result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
+
+                if result.get("ok"):
+                    st.session_state["auth_user"]["must_change_password"] = False
+                    st.session_state.pantalla = "Home"
+                    st.rerun()
+                else:
+                    st.error(result.get("error", "Error al cambiar contraseña"))
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+
+def pantalla_recuperar_password() -> None:
+    st.title("🔑 Recuperar contraseña")
+    st.info("Introduce tu email. Si existe, te mostraremos un enlace de WhatsApp para contactar al administrador.")
+
+    with st.form("recuperar_form"):
+        email = st.text_input("Email registrado")
+        submit = st.form_submit_button("Solicitar recuperación")
+
+    if st.button("⬅️ Volver al login"):
+        st.session_state.pantalla = "Login"
+        st.rerun()
+
+    if submit and email.strip():
+        try:
+            res = (
+                conn.table("empleados_v2")
+                .select("id,nombre,telefono")
+                .eq("email", email.strip().lower())
+                .eq("activo", True)
+                .execute()
+            )
+            df = df_from_res(res)
+
+            if df.empty:
+                st.error("No se encontró un usuario activo con ese email.")
+            else:
+                # Buscar al superadmin para enviarle mensaje
+                res_admin = (
+                    conn.table("empleados_v2")
+                    .select("nombre,telefono")
+                    .eq("rol", "superadmin")
+                    .eq("activo", True)
+                    .limit(1)
+                    .execute()
+                )
+                df_admin = df_from_res(res_admin)
+
+                user_name = df.iloc[0]["nombre"]
+
+                if not df_admin.empty and df_admin.iloc[0].get("telefono"):
+                    admin_phone = df_admin.iloc[0]["telefono"]
+                    admin_name = df_admin.iloc[0]["nombre"]
+                    msg = (
+                        f"Hola {admin_name}, soy {user_name} ({email.strip()}).\n"
+                        f"He olvidado mi contraseña de Tío Bigotes. "
+                        f"¿Podrías resetearla por favor?"
+                    )
+                    phone = re.sub(r"[^\d+]", "", admin_phone)
+                    if not phone.startswith("+"):
+                        phone = f"+{phone}"
+                    link = f"https://wa.me/{phone.lstrip('+')}?text={urllib.parse.quote(msg)}"
+
+                    st.success(f"Contacta al administrador ({admin_name}) por WhatsApp para que resetee tu contraseña:")
+                    st.markdown(f"[Enviar WhatsApp al administrador]({link})")
+                else:
+                    st.warning("No se encontró un administrador con WhatsApp configurado. Contacta a tu encargado directamente.")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+
+# =========================================================
 # ESTADO UI
 # =========================================================
 
 if "pantalla" not in st.session_state:
-    st.session_state.pantalla = "Home"
+    st.session_state.pantalla = "Login"
 
 
 
 def ir_a(p: str) -> None:
     st.session_state.pantalla = p
+
+
+# =========================================================
+# GATE DE AUTENTICACIÓN
+# =========================================================
+
+# Pantallas públicas (no requieren login)
+if st.session_state.pantalla == "Login":
+    pantalla_login()
+    st.stop()
+
+if st.session_state.pantalla == "RecuperarPassword":
+    pantalla_recuperar_password()
+    st.stop()
+
+# A partir de aquí, requiere login
+if not get_user():
+    st.session_state.pantalla = "Login"
+    st.rerun()
+
+# Forzar cambio de contraseña
+if get_user().get("must_change_password") and st.session_state.pantalla != "CambiarPassword":
+    st.session_state.pantalla = "CambiarPassword"
+
+if st.session_state.pantalla == "CambiarPassword":
+    pantalla_cambiar_password(forzado=get_user().get("must_change_password", False))
+    st.stop()
 
 
 # =========================================================
@@ -812,31 +1064,39 @@ DF_DIM = cargar_dim_productos()
 # =========================================================
 
 if st.session_state.pantalla == "Home":
-    st.title("🥐 Tío Bigotes - Gestión Integral")
-    st.write(f"📍 Diputació 159 | {datetime.date.today().strftime('%d/%m/%Y')}")
+    _user = get_user()
+    _header_l, _header_r = st.columns([3, 1])
+    with _header_l:
+        st.title("🥐 Tío Bigotes - Gestión Integral")
+        st.write(f"📍 Diputació 159 | {datetime.date.today().strftime('%d/%m/%Y')}")
+    with _header_r:
+        st.write(f"**{_user['nombre']}** ({_user['rol']})")
+        if st.button("🔒 Cerrar sesión"):
+            cerrar_sesion()
+            st.rerun()
+        if st.button("🔑 Cambiar contraseña"):
+            st.session_state.pantalla = "CambiarPassword"
+            st.rerun()
     st.divider()
 
+    _btn_config = {
+        "Productos":   ("📦 PRODUCTOS",      "c1"),
+        "Empleados":   ("👥 EMPLEADOS",       "c1"),
+        "Operativa":   ("📋 CONTROL DIARIO",  "c2"),
+        "BI":          ("📈 HISTORIAL / BI",  "c2"),
+        "Forecast":    ("🧠 FORECAST",        "c3"),
+        "Pendientes":  ("🧩 PENDIENTES",      "c3"),
+        "CargaVentas": ("📥 SUBIR CSV VENTAS","c3"),
+    }
+
     c1, c2, c3 = st.columns(3)
+    _cols = {"c1": c1, "c2": c2, "c3": c3}
 
-    with c1:
-        if st.button("📦 PRODUCTOS"):
-            ir_a("Productos")
-        if st.button("👥 EMPLEADOS"):
-            ir_a("Empleados")
-
-    with c2:
-        if st.button("📋 CONTROL DIARIO"):
-            ir_a("Operativa")
-        if st.button("📈 HISTORIAL / BI"):
-            ir_a("BI")
-
-    with c3:
-        if st.button("🧠 FORECAST"):
-            ir_a("Forecast")
-        if st.button("🧩 PENDIENTES"):
-            ir_a("Pendientes")
-        if st.button("📥 SUBIR CSV VENTAS"):
-            ir_a("CargaVentas")
+    for pantalla_key, (label, col_key) in _btn_config.items():
+        if user_has_access(pantalla_key):
+            with _cols[col_key]:
+                if st.button(label):
+                    ir_a(pantalla_key)
 
 
 # =========================================================
@@ -844,6 +1104,9 @@ if st.session_state.pantalla == "Home":
 # =========================================================
 
 elif st.session_state.pantalla == "Productos":
+    if not user_has_access("Productos"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("📦 Catálogo de Productos")
 
@@ -1015,38 +1278,79 @@ elif st.session_state.pantalla == "Productos":
 # =========================================================
 
 elif st.session_state.pantalla == "Empleados":
+    if not user_has_access("Empleados"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("👥 Gestión de Empleados")
 
-    with st.expander("➕ Nuevo empleado"):
-        with st.form("nuevo_empleado"):
-            nombre = st.text_input("Nombre")
-            rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor"])
-            guardar = st.form_submit_button("Guardar empleado")
+    # Solo superadmin puede crear usuarios
+    if is_superadmin():
+        with st.expander("➕ Nuevo empleado"):
+            with st.form("nuevo_empleado"):
+                nombre = st.text_input("Nombre completo")
+                email_nuevo = st.text_input("Email")
+                telefono_nuevo = st.text_input("Teléfono móvil (con prefijo país, ej: +34600123456)")
+                rol = st.selectbox("Rol", ["dependiente", "encargado", "supervisor", "superadmin"])
 
-            _emp_ok = False
-            if guardar and nombre.strip():
-                try:
-                    rpc_call(
-                        "rpc_crear_empleado",
-                        {
-                            "p_local_id": LOCAL_ID,
-                            "p_codigo_pos": None,
-                            "p_nombre": nombre.strip(),
-                            "p_rol": rol,
-                            "p_fecha_alta": str(datetime.date.today()),
-                        },
-                    )
-                    clear_cache()
-                    _emp_ok = True
-                except Exception as e:
-                    st.error(f"Error creando empleado: {e}")
-            if _emp_ok:
-                st.rerun()
+                st.write("**Permisos de acceso:**")
+                _permisos_sel = {}
+                _perm_cols = st.columns(3)
+                for i, (pkey, plabel) in enumerate(PANTALLA_LABELS.items()):
+                    with _perm_cols[i % 3]:
+                        _permisos_sel[pkey] = st.checkbox(plabel, value=False, key=f"perm_new_{pkey}")
 
+                guardar = st.form_submit_button("Crear empleado")
+
+                _emp_ok = False
+                _wa_link = None
+                if guardar and nombre.strip() and email_nuevo.strip():
+                    temp_pwd = generar_password_temporal()
+                    permisos_list = [k for k, v in _permisos_sel.items() if v]
+
+                    # Superadmin siempre tiene todos los permisos
+                    if rol == "superadmin":
+                        permisos_list = list(PANTALLA_LABELS.keys())
+
+                    try:
+                        resp = rpc_call(
+                            "rpc_crear_empleado_v2",
+                            {
+                                "p_local_id": LOCAL_ID,
+                                "p_nombre": nombre.strip(),
+                                "p_email": email_nuevo.strip().lower(),
+                                "p_telefono": telefono_nuevo.strip(),
+                                "p_rol": rol,
+                                "p_password_hash": hash_password(temp_pwd),
+                                "p_permisos": permisos_list,
+                                "p_fecha_alta": str(datetime.date.today()),
+                            },
+                        )
+                        result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
+
+                        if result.get("ok"):
+                            clear_cache()
+                            if telefono_nuevo.strip():
+                                _wa_link = generar_whatsapp_link(
+                                    telefono_nuevo.strip(), nombre.strip(),
+                                    email_nuevo.strip().lower(), temp_pwd,
+                                )
+                            _emp_ok = True
+                        else:
+                            st.error(result.get("error", "Error creando empleado"))
+                    except Exception as e:
+                        st.error(f"Error creando empleado: {e}")
+
+                if _emp_ok:
+                    st.success(f"Empleado creado. Contraseña temporal: **{temp_pwd}**")
+                    if _wa_link:
+                        st.markdown(f"[Enviar credenciales por WhatsApp]({_wa_link})")
+                    st.info("El empleado deberá cambiar su contraseña en el primer login.")
+
+    # Lista de empleados
     res_emp = (
         conn.table("empleados_v2")
-        .select("*")
+        .select("id,nombre,email,telefono,rol,activo,permisos")
         .eq("local_id", LOCAL_ID)
         .order("activo", desc=True)
         .order("nombre")
@@ -1058,12 +1362,16 @@ elif st.session_state.pantalla == "Empleados":
         st.info("No hay empleados.")
     else:
         for _, row in df_emp.iterrows():
-            c1, c2, c3 = st.columns([5, 2, 1])
+            c1, c2, c3, c4 = st.columns([4, 2, 1, 1])
             c1.write(f"**{row['nombre']}**")
+            c1.caption(f"{row.get('email', '')} | {row.get('telefono', '')}")
             c2.write(f"{row['rol']} | {'Activo' if row['activo'] else 'Inactivo'}")
 
-            if row["activo"]:
-                if c3.button("Baja", key=f"baja_emp_{row['id']}"):
+            if is_superadmin() and row["activo"]:
+                if c3.button("Permisos", key=f"perm_emp_{row['id']}"):
+                    st.session_state[f"_edit_perm_{row['id']}"] = True
+
+                if c4.button("Baja", key=f"baja_emp_{row['id']}"):
                     _baja_ok = False
                     try:
                         rpc_call(
@@ -1080,12 +1388,65 @@ elif st.session_state.pantalla == "Empleados":
                     if _baja_ok:
                         st.rerun()
 
+            # Panel editar permisos inline
+            if is_superadmin() and st.session_state.get(f"_edit_perm_{row['id']}"):
+                current_perms = row.get("permisos") or []
+                st.write(f"**Editar permisos de {row['nombre']}:**")
+                _ep_cols = st.columns(4)
+                _new_perms = {}
+                for j, (pk, pl) in enumerate(PANTALLA_LABELS.items()):
+                    with _ep_cols[j % 4]:
+                        _new_perms[pk] = st.checkbox(
+                            pl, value=(pk in current_perms),
+                            key=f"ep_{row['id']}_{pk}",
+                        )
+
+                _ep_btn_cols = st.columns(3)
+                if _ep_btn_cols[0].button("Guardar permisos", key=f"save_perm_{row['id']}"):
+                    new_list = [k for k, v in _new_perms.items() if v]
+                    _perm_ok = False
+                    try:
+                        rpc_call("rpc_actualizar_permisos", {"p_user_id": int(row["id"]), "p_permisos": new_list})
+                        clear_cache()
+                        _perm_ok = True
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                    if _perm_ok:
+                        st.session_state.pop(f"_edit_perm_{row['id']}", None)
+                        st.rerun()
+
+                if _ep_btn_cols[1].button("Resetear contraseña", key=f"reset_pwd_{row['id']}"):
+                    new_pwd = generar_password_temporal()
+                    _rst_ok = False
+                    try:
+                        rpc_call("rpc_reset_password", {"p_user_id": int(row["id"]), "p_new_hash": hash_password(new_pwd)})
+                        _rst_ok = True
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                    if _rst_ok:
+                        st.success(f"Nueva contraseña temporal para {row['nombre']}: **{new_pwd}**")
+                        if row.get("telefono"):
+                            wa_link = generar_whatsapp_link(
+                                row["telefono"], row["nombre"],
+                                row.get("email", ""), new_pwd,
+                            )
+                            st.markdown(f"[Enviar por WhatsApp]({wa_link})")
+
+                if _ep_btn_cols[2].button("Cancelar", key=f"cancel_perm_{row['id']}"):
+                    st.session_state.pop(f"_edit_perm_{row['id']}", None)
+                    st.rerun()
+
+                st.divider()
+
 
 # =========================================================
 # OPERATIVA / CONTROL DIARIO
 # =========================================================
 
 elif st.session_state.pantalla == "Operativa":
+    if not user_has_access("Operativa"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("📋 Hoja de Control Diario")
 
@@ -1281,6 +1642,9 @@ elif st.session_state.pantalla == "Operativa":
 # =========================================================
 
 elif st.session_state.pantalla == "BI":
+    if not user_has_access("BI"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("📈 Historial / Business Intelligence")
 
@@ -1373,6 +1737,9 @@ elif st.session_state.pantalla == "BI":
 # =========================================================
 
 elif st.session_state.pantalla == "Forecast":
+    if not user_has_access("Forecast"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("🧠 Forecast de Horneado")
 
@@ -1521,6 +1888,9 @@ elif st.session_state.pantalla == "Forecast":
 # =========================================================
 
 elif st.session_state.pantalla == "Pendientes":
+    if not user_has_access("Pendientes"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("🧩 Artículos pendientes de mapear")
 
@@ -1610,6 +1980,9 @@ elif st.session_state.pantalla == "Pendientes":
 # =========================================================
 
 elif st.session_state.pantalla == "CargaVentas":
+    if not user_has_access("CargaVentas"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("📥 Subida incremental de CSV de ventas")
 
