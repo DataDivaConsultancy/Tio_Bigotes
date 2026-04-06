@@ -3,25 +3,20 @@
 -- Ejecutar en Supabase SQL Editor
 -- =========================================================
 
--- 1. Agregar columnas de autenticación a empleados_v2
-ALTER TABLE empleados_v2
+-- 1. Agregar columnas de autenticación a la tabla BASE (tb_v2.empleados)
+ALTER TABLE tb_v2.empleados
   ADD COLUMN IF NOT EXISTS email TEXT UNIQUE,
   ADD COLUMN IF NOT EXISTS telefono TEXT,
   ADD COLUMN IF NOT EXISTS password_hash TEXT,
   ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT TRUE,
   ADD COLUMN IF NOT EXISTS permisos JSONB DEFAULT '[]'::jsonb;
 
--- 2. Crear el superadmin inicial (cambiar email/telefono según corresponda)
--- IMPORTANTE: La contraseña inicial es "admin123" (hash SHA-256)
--- El usuario DEBE cambiarla en el primer login
--- UPDATE empleados_v2
--- SET email = 'tu_email@ejemplo.com',
---     telefono = '34600000000',
---     password_hash = '240be518fabd2724ddb6f04eeb9d56b7e49218367c1f05b1c0a5353bcc455621',
---     must_change_password = TRUE,
---     rol = 'superadmin',
---     permisos = '["Productos","Empleados","Operativa","BI","Forecast","Pendientes","CargaVentas"]'::jsonb
--- WHERE nombre = 'TU_NOMBRE_AQUI';
+-- 2. Recrear la vista empleados_v2 para incluir las nuevas columnas
+CREATE OR REPLACE VIEW public.empleados_v2 AS
+SELECT id, local_id, codigo_pos, nombre, email, telefono, rol, activo,
+       password_hash, must_change_password, permisos,
+       fecha_alta, fecha_baja, created_at
+FROM tb_v2.empleados;
 
 -- 3. Función RPC: verificar login
 CREATE OR REPLACE FUNCTION rpc_verificar_login(p_email TEXT, p_password_hash TEXT)
@@ -31,7 +26,7 @@ DECLARE
 BEGIN
   SELECT id, nombre, email, telefono, rol, activo, must_change_password, permisos, local_id
   INTO v_emp
-  FROM empleados_v2
+  FROM tb_v2.empleados
   WHERE email = LOWER(TRIM(p_email))
     AND password_hash = p_password_hash;
 
@@ -64,7 +59,7 @@ DECLARE
   v_current_hash TEXT;
 BEGIN
   SELECT password_hash INTO v_current_hash
-  FROM empleados_v2
+  FROM tb_v2.empleados
   WHERE id = p_user_id;
 
   IF NOT FOUND THEN
@@ -75,7 +70,7 @@ BEGIN
     RETURN json_build_object('ok', FALSE, 'error', 'Contraseña actual incorrecta');
   END IF;
 
-  UPDATE empleados_v2
+  UPDATE tb_v2.empleados
   SET password_hash = p_new_hash,
       must_change_password = FALSE
   WHERE id = p_user_id;
@@ -88,7 +83,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION rpc_reset_password(p_user_id INT, p_new_hash TEXT)
 RETURNS JSON AS $$
 BEGIN
-  UPDATE empleados_v2
+  UPDATE tb_v2.empleados
   SET password_hash = p_new_hash,
       must_change_password = TRUE
   WHERE id = p_user_id;
@@ -114,14 +109,13 @@ CREATE OR REPLACE FUNCTION rpc_crear_empleado_v2(
 )
 RETURNS JSON AS $$
 DECLARE
-  v_id INT;
+  v_id BIGINT;
 BEGIN
-  -- Verificar email duplicado
-  IF EXISTS (SELECT 1 FROM empleados_v2 WHERE email = LOWER(TRIM(p_email))) THEN
+  IF EXISTS (SELECT 1 FROM tb_v2.empleados WHERE email = LOWER(TRIM(p_email))) THEN
     RETURN json_build_object('ok', FALSE, 'error', 'Ya existe un usuario con ese email');
   END IF;
 
-  INSERT INTO empleados_v2 (local_id, nombre, email, telefono, rol, password_hash, must_change_password, permisos, fecha_alta, activo)
+  INSERT INTO tb_v2.empleados (local_id, nombre, email, telefono, rol, password_hash, must_change_password, permisos, fecha_alta, activo)
   VALUES (p_local_id, TRIM(p_nombre), LOWER(TRIM(p_email)), TRIM(p_telefono), p_rol, p_password_hash, TRUE, p_permisos, p_fecha_alta, TRUE)
   RETURNING id INTO v_id;
 
@@ -133,7 +127,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION rpc_actualizar_permisos(p_user_id INT, p_permisos JSONB)
 RETURNS JSON AS $$
 BEGIN
-  UPDATE empleados_v2
+  UPDATE tb_v2.empleados
   SET permisos = p_permisos
   WHERE id = p_user_id;
 
@@ -144,3 +138,17 @@ BEGIN
   RETURN json_build_object('ok', TRUE);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- =========================================================
+-- 8. CREAR TU SUPERADMIN
+-- Descomenta y edita las siguientes líneas con tus datos:
+-- =========================================================
+-- UPDATE tb_v2.empleados
+-- SET email = 'tu_email@ejemplo.com',
+--     telefono = '+34600000000',
+--     password_hash = '240be518fabd2724ddb6f04eeb9d56b7e49218367c1f05b1c0a5353bcc455621',
+--     must_change_password = TRUE,
+--     rol = 'superadmin',
+--     permisos = '["Productos","Empleados","Operativa","BI","Forecast","Pendientes","CargaVentas"]'::jsonb
+-- WHERE nombre = 'TU_NOMBRE_AQUI';
+-- La contraseña inicial es: admin123
