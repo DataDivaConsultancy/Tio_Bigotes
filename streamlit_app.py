@@ -24,7 +24,7 @@ from st_supabase_connection import SupabaseConnection
 
 st.set_page_config(
     page_title="Tío Bigotes Pro",
-    page_icon="🥐",
+    page_icon="🥟",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -125,9 +125,10 @@ button[kind="primary"]:hover, .stFormSubmitButton > button:hover {
 
 /* ── Botones secundarios / VOLVER ── */
 button[kind="secondary"] {
-    border-color: #4A9BD9 !important;
+    border: 2px solid #4A9BD9 !important;
     color: #4A9BD9 !important;
     border-radius: 8px !important;
+    background: #EBF4FB !important;
 }
 
 /* ── Data editor ── */
@@ -1010,7 +1011,7 @@ def pantalla_login() -> None:
     _lc, _login_col, _rc = st.columns([1, 1.5, 1])
     with _login_col:
         st.markdown(
-            '<div class="login-logo">🥐</div>'
+            '<div class="login-logo">🥟</div>'
             '<div class="login-title">Tío Bigotes</div>'
             '<div class="login-subtitle">Auténticas Empanadas Argentinas</div>',
             unsafe_allow_html=True,
@@ -1021,7 +1022,8 @@ def pantalla_login() -> None:
             password = st.text_input("Contraseña", type="password")
             submit = st.form_submit_button("Entrar", use_container_width=True)
 
-        if st.button("Olvidé mi contraseña", use_container_width=True):
+        st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
+        if st.button("🔑 Olvidé mi contraseña", use_container_width=True):
             st.session_state.pantalla = "RecuperarPassword"
             st.rerun()
 
@@ -1223,7 +1225,7 @@ if st.session_state.pantalla == "Home":
         f"""<div class="tb-header">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
-                    <h1>🥐 Tío Bigotes</h1>
+                    <h1>🥟 Tío Bigotes</h1>
                     <div class="tb-subtitle">📍 Diputació 159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
                 </div>
                 <div class="tb-user">
