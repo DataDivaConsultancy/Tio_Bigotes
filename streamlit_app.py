@@ -555,7 +555,7 @@ def fetch_paginated(
     columns: str = "*",
     filters: Optional[List[Dict[str, Any]]] = None,
     order_by: str = "id",
-    page_size: int = 5000,
+    page_size: int = 1000,
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     offset = 0
@@ -692,7 +692,7 @@ def cargar_ventas_rango(
             {"op": "lte", "col": "fecha", "val": str(fecha_fin)},
         ],
         order_by="fecha",
-        page_size=10000,
+        page_size=1000,
     )
 
     if not df.empty:
