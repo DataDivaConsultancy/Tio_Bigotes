@@ -581,7 +581,12 @@ def fetch_paginated(
         if order_by:
             q = q.order(order_by)
 
-        res = q.range(offset, offset + page_size - 1).execute()
+        try:
+            res = q.range(offset, offset + page_size - 1).execute()
+        except Exception as exc:
+            st.error(f"Error en fetch_paginated({table_name}, offset={offset}): {exc}")
+            raise
+
         data = res.data or []
         rows.extend(data)
 
