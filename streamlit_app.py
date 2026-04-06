@@ -24,6 +24,7 @@ from st_supabase_connection import SupabaseConnection
 
 st.set_page_config(
     page_title="Tío Bigotes Pro",
+    page_icon="🥐",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -31,23 +32,172 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-div.stButton > button:first-child {
+/* ── Paleta Tío Bigotes ── */
+:root {
+    --tb-azul: #4A9BD9;
+    --tb-azul-hover: #3A7FB8;
+    --tb-azul-light: #E8F4FD;
+    --tb-dark: #1A1A2E;
+    --tb-gris: #F7F8FA;
+    --tb-texto: #2C3E50;
+    --tb-verde: #27AE60;
+    --tb-rojo: #E74C3C;
+}
+
+/* ── Layout general ── */
+.block-container {
+    padding-top: 1rem;
+    max-width: 1200px;
+}
+
+/* ── Botones de navegación Home ── */
+div[data-testid="stVerticalBlock"] > div.home-nav div.stButton > button {
     height: 88px;
     width: 100%;
-    font-size: 18px;
-    font-weight: 700;
-    border-radius: 14px;
-    background-color: #ff9800;
+    font-size: 17px;
+    font-weight: 600;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #4A9BD9 0%, #3A7FB8 100%);
     color: white;
     border: none;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(74, 155, 217, 0.3);
 }
-div.stButton > button:first-child:hover {
-    background-color: #e68a00;
-    border: 2px solid #333;
+div[data-testid="stVerticalBlock"] > div.home-nav div.stButton > button:hover {
+    background: linear-gradient(135deg, #3A7FB8 0%, #2E6A9E 100%);
+    box-shadow: 0 4px 16px rgba(74, 155, 217, 0.4);
+    transform: translateY(-1px);
 }
-.block-container {
-    padding-top: 1.1rem;
+
+/* ── Header con fondo oscuro ── */
+.tb-header {
+    background: linear-gradient(135deg, #1A1A2E 0%, #16213E 100%);
+    color: white;
+    padding: 1.2rem 1.5rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
+}
+.tb-header h1 {
+    color: white !important;
+    font-size: 1.8rem;
+    margin: 0;
+}
+.tb-header .tb-subtitle {
+    color: #4A9BD9;
+    font-size: 0.95rem;
+    margin-top: 4px;
+}
+.tb-header .tb-user {
+    color: #B0C4DE;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+/* ── Cards de métricas ── */
+div[data-testid="stMetric"] {
+    background: #F7F8FA;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 12px 16px;
+    border-left: 4px solid #4A9BD9;
+}
+div[data-testid="stMetric"] label {
+    color: #64748B !important;
+    font-size: 0.8rem !important;
+}
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+    color: #1A1A2E !important;
+    font-weight: 700 !important;
+}
+
+/* ── Botones de acción (guardar, crear, etc.) ── */
+button[kind="primary"], .stFormSubmitButton > button {
+    background: linear-gradient(135deg, #4A9BD9 0%, #3A7FB8 100%) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+button[kind="primary"]:hover, .stFormSubmitButton > button:hover {
+    background: linear-gradient(135deg, #3A7FB8 0%, #2E6A9E 100%) !important;
+}
+
+/* ── Botones secundarios / VOLVER ── */
+button[kind="secondary"] {
+    border-color: #4A9BD9 !important;
+    color: #4A9BD9 !important;
+    border-radius: 8px !important;
+}
+
+/* ── Data editor ── */
+div[data-testid="stDataFrame"] {
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+/* ── Expander ── */
+div[data-testid="stExpander"] {
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    background: #FAFBFC;
+}
+
+/* ── Tabs y dividers ── */
+hr {
+    border-color: #E2E8F0 !important;
+}
+
+/* ── Login centrado ── */
+.login-container {
+    max-width: 420px;
+    margin: 3rem auto;
+    padding: 2rem;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    border-top: 4px solid #4A9BD9;
+}
+.login-logo {
+    text-align: center;
+    font-size: 3rem;
+    margin-bottom: 0.5rem;
+}
+.login-title {
+    text-align: center;
+    color: #1A1A2E;
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 0.2rem;
+}
+.login-subtitle {
+    text-align: center;
+    color: #64748B;
+    font-size: 0.95rem;
+    margin-bottom: 1.5rem;
+}
+
+/* ── Sección header de cada pantalla ── */
+.page-header {
+    background: linear-gradient(135deg, #1A1A2E 0%, #16213E 100%);
+    color: white;
+    padding: 0.8rem 1.2rem;
+    border-radius: 10px;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.page-header h2 {
+    color: white !important;
+    margin: 0 !important;
+    font-size: 1.4rem;
+}
+
+/* ── Toast/alerts ── */
+div[data-testid="stAlert"] {
+    border-radius: 10px;
 }
 </style>
 """,
@@ -857,48 +1007,52 @@ def cerrar_sesion() -> None:
 
 
 def pantalla_login() -> None:
-    st.title("🥐 Tío Bigotes")
-    st.subheader("Iniciar sesión")
+    _lc, _login_col, _rc = st.columns([1, 1.5, 1])
+    with _login_col:
+        st.markdown(
+            '<div class="login-logo">🥐</div>'
+            '<div class="login-title">Tío Bigotes</div>'
+            '<div class="login-subtitle">Auténticas Empanadas Argentinas</div>',
+            unsafe_allow_html=True,
+        )
 
-    with st.form("login_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Contraseña", type="password")
-        submit = st.form_submit_button("Entrar")
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Contraseña", type="password")
+            submit = st.form_submit_button("Entrar", use_container_width=True)
 
-    col_forgot, _ = st.columns([1, 2])
-    with col_forgot:
-        if st.button("Olvidé mi contraseña"):
+        if st.button("Olvidé mi contraseña", use_container_width=True):
             st.session_state.pantalla = "RecuperarPassword"
             st.rerun()
 
-    if submit and email.strip() and password:
-        try:
-            resp = rpc_call(
-                "rpc_verificar_login",
-                {"p_email": email.strip().lower(), "p_password_hash": hash_password(password)},
-            )
-            result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
+        if submit and email.strip() and password:
+            try:
+                resp = rpc_call(
+                    "rpc_verificar_login",
+                    {"p_email": email.strip().lower(), "p_password_hash": hash_password(password)},
+                )
+                result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
 
-            if result.get("ok"):
-                st.session_state["auth_user"] = {
-                    "id": result["id"],
-                    "nombre": result["nombre"],
-                    "email": result["email"],
-                    "telefono": result.get("telefono"),
-                    "rol": result["rol"],
-                    "must_change_password": result.get("must_change_password", False),
-                    "permisos": result.get("permisos") or [],
-                    "local_id": result.get("local_id"),
-                }
-                if result.get("must_change_password"):
-                    st.session_state.pantalla = "CambiarPassword"
+                if result.get("ok"):
+                    st.session_state["auth_user"] = {
+                        "id": result["id"],
+                        "nombre": result["nombre"],
+                        "email": result["email"],
+                        "telefono": result.get("telefono"),
+                        "rol": result["rol"],
+                        "must_change_password": result.get("must_change_password", False),
+                        "permisos": result.get("permisos") or [],
+                        "local_id": result.get("local_id"),
+                    }
+                    if result.get("must_change_password"):
+                        st.session_state.pantalla = "CambiarPassword"
+                    else:
+                        st.session_state.pantalla = "Home"
+                    st.rerun()
                 else:
-                    st.session_state.pantalla = "Home"
-                st.rerun()
-            else:
-                st.error(result.get("error", "Error de autenticación"))
-        except Exception as e:
-            st.error(f"Error conectando: {e}")
+                    st.error(result.get("error", "Error de autenticación"))
+            except Exception as e:
+                st.error(f"Error conectando: {e}")
 
 
 def pantalla_cambiar_password(forzado: bool = False) -> None:
@@ -1065,19 +1219,29 @@ DF_DIM = cargar_dim_productos()
 
 if st.session_state.pantalla == "Home":
     _user = get_user()
-    _header_l, _header_r = st.columns([3, 1])
-    with _header_l:
-        st.title("🥐 Tío Bigotes - Gestión Integral")
-        st.write(f"📍 Diputació 159 | {datetime.date.today().strftime('%d/%m/%Y')}")
-    with _header_r:
-        st.write(f"**{_user['nombre']}** ({_user['rol']})")
-        if st.button("🔒 Cerrar sesión"):
-            cerrar_sesion()
-            st.rerun()
-        if st.button("🔑 Cambiar contraseña"):
+    st.markdown(
+        f"""<div class="tb-header">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <h1>🥐 Tío Bigotes</h1>
+                    <div class="tb-subtitle">📍 Diputació 159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
+                </div>
+                <div class="tb-user">
+                    👤 {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
+                </div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    _btn_l, _btn_r, _ = st.columns([1, 1, 4])
+    with _btn_l:
+        if st.button("🔑 Cambiar contraseña", use_container_width=True):
             st.session_state.pantalla = "CambiarPassword"
             st.rerun()
-    st.divider()
+    with _btn_r:
+        if st.button("🔒 Cerrar sesión", use_container_width=True):
+            cerrar_sesion()
+            st.rerun()
 
     _btn_config = {
         "Productos":   ("📦 PRODUCTOS",      "c1"),
@@ -1568,8 +1732,8 @@ elif st.session_state.pantalla == "Operativa":
     with c_h2:
         cantidad_horno = st.number_input("Cantidad", min_value=1, step=1, value=12)
     with c_h3:
-        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-        if st.button("➕ Guardar hornada"):
+        st.write("")  # spacer
+        if st.button("➕ Guardar hornada", use_container_width=True):
             _hornada_ok = False
             try:
                 pid = int(
