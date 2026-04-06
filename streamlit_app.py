@@ -584,8 +584,16 @@ def fetch_paginated(
         try:
             res = q.range(offset, offset + page_size - 1).execute()
         except Exception as exc:
-            st.error(f"Error en fetch_paginated({table_name}, offset={offset}): {exc}")
-            raise
+            detail = ""
+            for attr in ["message", "details", "hint", "code"]:
+                val = getattr(exc, attr, None)
+                if val:
+                    detail += f" | {attr}: {val}"
+            st.error(
+                f"Error en consulta a '{table_name}' (offset={offset}, page_size={page_size}): "
+                f"{type(exc).__name__}: {exc}{detail}"
+            )
+            st.stop()
 
         data = res.data or []
         rows.extend(data)
