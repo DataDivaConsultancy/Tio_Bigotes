@@ -696,6 +696,16 @@ def cargar_ventas_rango(
     fecha_fin: datetime.date,
     local_id: int,
 ) -> pd.DataFrame:
+    # Debug: mostrar columnas reales de la tabla
+    try:
+        _probe = conn.table("ventas_staging_v2").select("*").limit(1).execute()
+        if _probe.data:
+            st.info(f"Columnas en ventas_staging_v2: {list(_probe.data[0].keys())}")
+        else:
+            st.warning("ventas_staging_v2 está vacía")
+    except Exception as e:
+        st.error(f"Error probando ventas_staging_v2: {e}")
+
     df = fetch_paginated(
         "ventas_staging_v2",
         columns="id,batch_id,raw_id,row_num,local_id,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
