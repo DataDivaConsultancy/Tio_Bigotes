@@ -2213,6 +2213,39 @@ elif st.session_state.pantalla == "Forecast":
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("🧠 Forecast de Horneado")
 
+    # ── Festivos España / Cataluña / Barcelona ──
+    _FESTIVOS_ES: set = set()
+    for _yr in range(2023, 2028):
+        _FESTIVOS_ES.update([
+            datetime.date(_yr, 1, 1),    # Año Nuevo
+            datetime.date(_yr, 1, 6),    # Reyes
+            datetime.date(_yr, 5, 1),    # Trabajo
+            datetime.date(_yr, 8, 15),   # Asunción
+            datetime.date(_yr, 10, 12),  # Hispanidad
+            datetime.date(_yr, 11, 1),   # Todos los Santos
+            datetime.date(_yr, 12, 6),   # Constitución
+            datetime.date(_yr, 12, 8),   # Inmaculada
+            datetime.date(_yr, 12, 25),  # Navidad
+            datetime.date(_yr, 12, 26),  # Sant Esteve (CAT)
+            datetime.date(_yr, 6, 24),   # Sant Joan (CAT)
+            datetime.date(_yr, 9, 11),   # Diada (CAT)
+            datetime.date(_yr, 9, 24),   # Mercè (BCN)
+        ])
+    # Semana Santa (fechas variables)
+    _FESTIVOS_ES.update([
+        datetime.date(2023, 4, 7), datetime.date(2023, 4, 10),
+        datetime.date(2024, 3, 29), datetime.date(2024, 4, 1),
+        datetime.date(2025, 4, 18), datetime.date(2025, 4, 21),
+        datetime.date(2026, 4, 3), datetime.date(2026, 4, 6),
+        datetime.date(2027, 3, 26), datetime.date(2027, 3, 29),
+    ])
+
+    def _es_festivo(fecha: datetime.date) -> bool:
+        return fecha in _FESTIVOS_ES
+
+    def _es_vispera_festivo(fecha: datetime.date) -> bool:
+        return (fecha + datetime.timedelta(days=1)) in _FESTIVOS_ES
+
     c1, c2, c3 = st.columns(3)
     fecha_pred = c1.date_input("Fecha objetivo", datetime.date.today())
     estrategia = c2.select_slider(
@@ -2220,7 +2253,16 @@ elif st.session_state.pantalla == "Forecast":
         options=["Defensiva", "Equilibrada", "Agresiva"],
         value="Equilibrada",
     )
-    es_festivo = c3.toggle("Festivo / Puente", value=False)
+    _auto_festivo = _es_festivo(fecha_pred)
+    es_festivo = c3.toggle(
+        "Festivo / Puente",
+        value=_auto_festivo,
+        help="Auto-detectado" if _auto_festivo else "Activar manualmente si es puente",
+    )
+    if _auto_festivo:
+        st.info(f"📅 {fecha_pred.strftime('%d/%m/%Y')} es festivo (auto-detectado)")
+    elif _es_vispera_festivo(fecha_pred):
+        st.info(f"📅 Víspera de festivo — considera ajustar al alza")
 
     st.subheader("Filtros")
     categorias_sel, productos_sel = filtros_categoria_producto(
@@ -2268,10 +2310,11 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay productos válidos para forecast con esos filtros.")
             st.stop()
 
-        # Use 90 days of history (more relevant than 365)
-        fecha_ini_hist = fecha_pred - datetime.timedelta(days=90)
+        # ── Load ALL historical data for best prediction ──
+        # Find earliest available data (up to 3 years back)
+        fecha_ini_hist = fecha_pred - datetime.timedelta(days=3 * 365)
 
-        with st.spinner("Analizando histórico (últimos 90 días)..."):
+        with st.spinner("Analizando todo el histórico de ventas..."):
             df_sales = cargar_ventas_rango(
                 fecha_ini_hist,
                 fecha_pred - datetime.timedelta(days=1),
@@ -2282,86 +2325,138 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay histórico suficiente.")
             st.stop()
 
-        df_sales = df_sales.merge(
-            df_forecast_dim[["producto_id", "producto_nombre"]],
-            on="producto_id",
-            how="inner",
-        )
+        # Merge with dim to get producto_nombre, categoria, uds_equivalentes
+        _merge_cols = ["producto_id", "producto_nombre", "categoria_nombre"]
+        if "uds_equivalentes_empanadas" in df_forecast_dim.columns:
+            _merge_cols.append("uds_equivalentes_empanadas")
+        _dim_merge = df_forecast_dim[_merge_cols].drop_duplicates(subset=["producto_id"])
+
+        df_sales = df_sales.merge(_dim_merge, on="producto_id", how="inner")
 
         if df_sales.empty:
             st.warning("No hay ventas históricas para esos productos.")
             st.stop()
 
-        df_daily = df_sales.groupby(["fecha", "producto_id", "producto_nombre"], as_index=False)[
-            "uds_v"
-        ].sum()
+        # ── Use UDS_V (units sold), NOT neto ──
+        df_daily = df_sales.groupby(
+            ["fecha", "producto_id", "producto_nombre"], as_index=False
+        )["uds_v"].sum()
         df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
         objetivo_dow = fecha_pred.weekday()
+        objetivo_month = fecha_pred.month
 
-        pct_map = {"Defensiva": 40, "Equilibrada": 60, "Agresiva": 80}
-        pct = pct_map[estrategia]
-
+        # ── Forecast engine with multi-variable weighting ──
         resultados: List[Dict[str, Any]] = []
 
         for _, p in df_forecast_dim.iterrows():
             pid = p["producto_id"]
             nombre = p["producto_nombre"]
+            eq_emp = float(p.get("uds_equivalentes_empanadas", 0) or 0)
 
             sub = df_daily[df_daily["producto_id"] == pid].copy()
+            if sub.empty:
+                continue
+
             sub["dow"] = sub["fecha"].dt.weekday
-            hist_same_dow = sub[sub["dow"] == objetivo_dow].copy()
+            sub["month"] = sub["fecha"].dt.month
+            sub["days_ago"] = (fecha_pred_ts - sub["fecha"]).dt.days
 
-            if hist_same_dow.empty:
-                # Fallback: use all days
-                if not sub.empty:
-                    base = float(sub["uds_v"].median())
-                else:
-                    base = 0
-            else:
-                # Weight recent weeks more: last 4 weeks × 2, older × 1
-                _cutoff = pd.Timestamp(fecha_pred - datetime.timedelta(days=28))
-                recent = hist_same_dow[hist_same_dow["fecha"] >= _cutoff]["uds_v"]
-                older = hist_same_dow[hist_same_dow["fecha"] < _cutoff]["uds_v"]
+            # Filter same day of week
+            hist_dow = sub[sub["dow"] == objetivo_dow].copy()
 
-                if not recent.empty and not older.empty:
-                    # Weighted: 70% recent avg, 30% older percentile
-                    base = 0.7 * float(recent.mean()) + 0.3 * float(np.percentile(older, pct))
-                elif not recent.empty:
-                    base = float(recent.mean())
-                else:
-                    base = float(np.percentile(older, pct))
+            if hist_dow.empty:
+                continue
 
+            # ── Calculate weights for each historical day ──
+            # 1. Recency: exponential decay (recent = more weight)
+            hist_dow["w_recency"] = np.exp(-hist_dow["days_ago"] / 60)  # 60-day half-life
+
+            # 2. Same month bonus (seasonal similarity)
+            hist_dow["w_season"] = hist_dow["month"].apply(
+                lambda m: 1.5 if m == objetivo_month else (
+                    1.2 if abs(m - objetivo_month) <= 1 or abs(m - objetivo_month) >= 11 else 1.0
+                )
+            )
+
+            # 3. Festivo similarity
+            hist_dow["_is_festivo"] = hist_dow["fecha"].apply(lambda d: _es_festivo(d.date()))
             if es_festivo:
-                base *= 1.15
+                hist_dow["w_festivo"] = hist_dow["_is_festivo"].apply(lambda f: 2.0 if f else 0.5)
+            else:
+                hist_dow["w_festivo"] = hist_dow["_is_festivo"].apply(lambda f: 0.5 if f else 1.0)
+
+            # Combined weight
+            hist_dow["weight"] = hist_dow["w_recency"] * hist_dow["w_season"] * hist_dow["w_festivo"]
+
+            # ── Weighted average ──
+            total_weight = hist_dow["weight"].sum()
+            if total_weight > 0:
+                weighted_avg = (hist_dow["uds_v"] * hist_dow["weight"]).sum() / total_weight
+            else:
+                weighted_avg = hist_dow["uds_v"].mean()
+
+            # ── Strategy adjustment ──
+            if estrategia == "Defensiva":
+                # Below weighted avg to minimize waste
+                base = weighted_avg * 0.85
+            elif estrategia == "Agresiva":
+                # Above weighted avg to minimize stockouts
+                base = weighted_avg * 1.15
+            else:
+                # Balanced
+                base = weighted_avg
+
+            # Festivo boost (on top of festivo weighting)
+            if es_festivo:
+                base *= 1.10
 
             total = int(np.ceil(base))
             if total > 0:
-                resultados.append(
-                    {
-                        "Producto": nombre,
-                        "Total sugerido": total,
-                        "Tanda 1": int(np.ceil(total * 0.7)),
-                        "Tanda 2": int(np.floor(total * 0.3)),
-                    }
-                )
+                row_data = {
+                    "Producto": nombre,
+                    "Uds estimadas": total,
+                    "Tanda 1 (70%)": int(np.ceil(total * 0.7)),
+                    "Tanda 2 (30%)": int(np.floor(total * 0.3)),
+                    "Días históricos": len(hist_dow),
+                }
+                if eq_emp > 0:
+                    row_data["Eq. empanadas"] = int(np.ceil(total * eq_emp))
+                resultados.append(row_data)
 
         if not resultados:
             st.warning("No pude generar forecast.")
             st.stop()
 
-        df_res = pd.DataFrame(resultados).sort_values("Total sugerido", ascending=False)
+        df_res = pd.DataFrame(resultados).sort_values("Uds estimadas", ascending=False)
 
-        st.success(f"✅ Forecast generado | Total sugerido: {df_res['Total sugerido'].sum()} uds")
+        # ── Summary metrics ──
+        total_uds = df_res["Uds estimadas"].sum()
+        total_emp = df_res["Eq. empanadas"].sum() if "Eq. empanadas" in df_res.columns else 0
+
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        _m1.metric("Total unidades", f"{total_uds}")
+        if total_emp > 0:
+            _m2.metric("Total eq. empanadas", f"{total_emp}")
+        _m3.metric("Productos", f"{len(df_res)}")
+        _m4.metric("Estrategia", estrategia)
+
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
+        # ── WhatsApp text ──
         txt = f"*PLAN DE HORNEADO - {fecha_pred.strftime('%d/%m/%Y')}*\n"
-        txt += f"Estrategia: {estrategia} | Festivo: {'Sí' if es_festivo else 'No'}\n"
-        txt += "-" * 25 + "\n"
+        _dow_names = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+        txt += f"{_dow_names.get(fecha_pred.weekday(), '')} | {estrategia}"
+        if es_festivo:
+            txt += " | FESTIVO"
+        txt += "\n" + "-" * 25 + "\n"
 
         for _, r in df_res.iterrows():
-            txt += (
-                f"• {r['Producto']}: {r['Tanda 1']} + {r['Tanda 2']} = *{r['Total sugerido']}*\n"
-            )
+            txt += f"• {r['Producto']}: {r['Tanda 1 (70%)']} + {r['Tanda 2 (30%)']} = *{r['Uds estimadas']}*\n"
+
+        txt += "-" * 25 + "\n"
+        txt += f"*TOTAL: {total_uds} uds*"
+        if total_emp > 0:
+            txt += f" | *{total_emp} eq. empanadas*"
 
         st.text_area("Texto para WhatsApp", txt, height=300)
 
