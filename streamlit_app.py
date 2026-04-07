@@ -713,6 +713,7 @@ def fetch_paginated(
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     offset = 0
+    _max_retries = 3
 
     while True:
         q = conn.table(table_name).select(columns)
@@ -735,27 +736,37 @@ def fetch_paginated(
         if order_by:
             q = q.order(order_by)
 
-        try:
-            res = q.range(offset, offset + page_size - 1).execute()
-        except Exception as exc:
-            detail = ""
-            for attr in ["message", "details", "hint", "code"]:
-                val = getattr(exc, attr, None)
-                if val:
-                    detail += f" | {attr}: {val}"
-            st.error(
-                f"Error en consulta a '{table_name}' (offset={offset}, page_size={page_size}): "
-                f"{type(exc).__name__}: {exc}{detail}"
-            )
-            st.stop()
+        data = None
+        for _attempt in range(_max_retries):
+            try:
+                res = q.range(offset, offset + page_size - 1).execute()
+                data = res.data or []
+                break
+            except Exception as exc:
+                if _attempt < _max_retries - 1:
+                    time.sleep(1 * (_attempt + 1))
+                    continue
+                detail = ""
+                for attr in ["message", "details", "hint", "code"]:
+                    val = getattr(exc, attr, None)
+                    if val:
+                        detail += f" | {attr}: {val}"
+                st.error(
+                    f"Error en consulta a '{table_name}' (offset={offset}, page_size={page_size}): "
+                    f"{type(exc).__name__}: {exc}{detail}"
+                )
+                st.stop()
 
-        data = res.data or []
         rows.extend(data)
 
         if len(data) < page_size:
             break
 
         offset += page_size
+
+        # Small pause every 10 pages to avoid connection exhaustion
+        if (offset // page_size) % 10 == 0:
+            time.sleep(0.5)
 
     return pd.DataFrame(rows)
 
