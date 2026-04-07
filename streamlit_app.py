@@ -612,7 +612,7 @@ def analizar_csv_incremental(
     ticket_state: Dict[str, int] = {}
     current_row_num = 0
 
-    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=5000):
+    for chunk in iter_csv_chunks(file_bytes, sep=sep, encoding=encoding, chunksize=1000):
         total_fisicas += len(chunk)
 
         rows, current_row_num, ticket_state = prepare_rows_chunk(
@@ -948,6 +948,7 @@ TODAS_LAS_PANTALLAS = [
     "Forecast",
     "Pendientes",
     "CargaVentas",
+    "Auditoria",
 ]
 
 PANTALLA_LABELS = {
@@ -958,6 +959,7 @@ PANTALLA_LABELS = {
     "Forecast": "Forecast",
     "Pendientes": "Pendientes",
     "CargaVentas": "Subir CSV Ventas",
+    "Auditoria": "Auditoría",
 }
 
 
@@ -983,6 +985,25 @@ def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str)
     return f"https://wa.me/{phone.lstrip('+')}?text={urllib.parse.quote(msg)}"
 
 
+def registrar_actividad(accion: str, seccion: str, detalle: Optional[Dict[str, Any]] = None) -> None:
+    """Registra una acción en el log de auditoría (fire-and-forget)."""
+    user = st.session_state.get("auth_user")
+    try:
+        rpc_call(
+            "rpc_registrar_actividad",
+            {
+                "p_user_id": user["id"] if user else None,
+                "p_user_name": user["nombre"] if user else None,
+                "p_user_email": user["email"] if user else None,
+                "p_accion": accion,
+                "p_seccion": seccion,
+                "p_detalle": detalle or {},
+            },
+        )
+    except Exception:
+        pass  # No bloquear la app por fallos de auditoría
+
+
 def get_user() -> Optional[Dict[str, Any]]:
     return st.session_state.get("auth_user")
 
@@ -1003,6 +1024,7 @@ def user_has_access(pantalla: str) -> bool:
 
 
 def cerrar_sesion() -> None:
+    registrar_actividad("logout", "Auth")
     st.session_state.pop("auth_user", None)
     st.session_state.pantalla = "Login"
 
@@ -1046,6 +1068,7 @@ def pantalla_login() -> None:
                         "permisos": result.get("permisos") or [],
                         "local_id": result.get("local_id"),
                     }
+                    registrar_actividad("login", "Auth", {"email": email.strip().lower()})
                     if result.get("must_change_password"):
                         st.session_state.pantalla = "CambiarPassword"
                     else:
@@ -1094,6 +1117,7 @@ def pantalla_cambiar_password(forzado: bool = False) -> None:
                 result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
 
                 if result.get("ok"):
+                    registrar_actividad("cambio_password", "Auth")
                     st.session_state["auth_user"]["must_change_password"] = False
                     st.session_state.pantalla = "Home"
                     st.rerun()
@@ -1173,6 +1197,8 @@ if "pantalla" not in st.session_state:
 
 
 def ir_a(p: str) -> None:
+    if p not in ("Login", "Home", "CambiarPassword", "RecuperarPassword"):
+        registrar_actividad("navegar", p)
     st.session_state.pantalla = p
 
 
@@ -1253,6 +1279,7 @@ if st.session_state.pantalla == "Home":
         "Forecast":    ("🧠 FORECAST",        "c3"),
         "Pendientes":  ("🧩 PENDIENTES",      "c3"),
         "CargaVentas": ("📥 SUBIR CSV VENTAS","c3"),
+        "Auditoria":   ("📝 AUDITORÍA",       "c1"),
     }
 
     c1, c2, c3 = st.columns(3)
@@ -1377,6 +1404,10 @@ elif st.session_state.pantalla == "Productos":
                         },
                     )
 
+                registrar_actividad(
+                    "editar_productos", "Productos",
+                    {"productos_editados": len(df_changed)},
+                )
                 clear_cache()
                 _save_ok = True
         except Exception as e:
@@ -1431,6 +1462,10 @@ elif st.session_state.pantalla == "Productos":
                             },
                         )
 
+                        registrar_actividad(
+                            "crear_producto", "Productos",
+                            {"nombre": nombre_nuevo.strip(), "categoria": categoria_nueva},
+                        )
                         clear_cache()
                         _create_ok = True
                     except Exception as e:
@@ -1495,6 +1530,10 @@ elif st.session_state.pantalla == "Empleados":
                         result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
 
                         if result.get("ok"):
+                            registrar_actividad(
+                                "crear_empleado", "Empleados",
+                                {"nombre": nombre.strip(), "email": email_nuevo.strip().lower(), "rol": rol},
+                            )
                             clear_cache()
                             if telefono_nuevo.strip():
                                 _wa_link = generar_whatsapp_link(
@@ -1547,6 +1586,10 @@ elif st.session_state.pantalla == "Empleados":
                                 "p_fecha_baja": str(datetime.date.today()),
                             },
                         )
+                        registrar_actividad(
+                            "baja_empleado", "Empleados",
+                            {"empleado_id": int(row["id"]), "nombre": row["nombre"]},
+                        )
                         clear_cache()
                         _baja_ok = True
                     except Exception as e:
@@ -1573,6 +1616,10 @@ elif st.session_state.pantalla == "Empleados":
                     _perm_ok = False
                     try:
                         rpc_call("rpc_actualizar_permisos", {"p_user_id": int(row["id"]), "p_permisos": new_list})
+                        registrar_actividad(
+                            "cambiar_permisos", "Empleados",
+                            {"empleado_id": int(row["id"]), "nombre": row["nombre"], "permisos": new_list},
+                        )
                         clear_cache()
                         _perm_ok = True
                     except Exception as e:
@@ -1586,6 +1633,10 @@ elif st.session_state.pantalla == "Empleados":
                     _rst_ok = False
                     try:
                         rpc_call("rpc_reset_password", {"p_user_id": int(row["id"]), "p_new_hash": hash_password(new_pwd)})
+                        registrar_actividad(
+                            "reset_password", "Empleados",
+                            {"empleado_id": int(row["id"]), "nombre": row["nombre"]},
+                        )
                         _rst_ok = True
                     except Exception as e:
                         st.error(f"Error: {e}")
@@ -1755,6 +1806,10 @@ elif st.session_state.pantalla == "Operativa":
                         "p_notas": None,
                     },
                 )
+                registrar_actividad(
+                    "registrar_hornada", "Operativa",
+                    {"producto": producto_horno, "cantidad": int(cantidad_horno), "fecha": str(fecha_sel)},
+                )
                 clear_cache()
                 _hornada_ok = True
             except Exception as e:
@@ -1797,6 +1852,10 @@ elif st.session_state.pantalla == "Operativa":
                 )
 
             guardar_control_diario(payloads)
+            registrar_actividad(
+                "guardar_control_diario", "Operativa",
+                {"fecha": str(fecha_sel), "productos": len(payloads)},
+            )
             clear_cache()
             st.success("✅ Control diario guardado")
         except Exception as e:
@@ -2114,6 +2173,10 @@ elif st.session_state.pantalla == "Pendientes":
                     "p_producto_id": pid,
                 },
             )
+            registrar_actividad(
+                "resolver_pendiente", "Pendientes",
+                {"alias": alias_sel, "producto_destino": producto_destino},
+            )
 
             clear_cache()
             _resolver_ok = True
@@ -2131,6 +2194,10 @@ elif st.session_state.pantalla == "Pendientes":
                     "p_alias_normalizado": alias_sel,
                     "p_nota": "Descartado manualmente desde Streamlit",
                 },
+            )
+            registrar_actividad(
+                "descartar_pendiente", "Pendientes",
+                {"alias": alias_sel},
             )
 
             clear_cache()
@@ -2240,6 +2307,7 @@ elif st.session_state.pantalla == "CargaVentas":
                         "p_encoding": encoding_detectado,
                     },
                 )
+                registrar_actividad("guardar_mapeo", "CargaVentas")
                 st.success("✅ Mapeo guardado")
             except Exception as e:
                 st.error(f"Error guardando mapeo: {e}")
@@ -2322,7 +2390,7 @@ elif st.session_state.pantalla == "CargaVentas":
                             file_bytes,
                             sep=analisis["sep"],
                             encoding=analisis["encoding"],
-                            chunksize=5000,
+                            chunksize=1000,
                         ):
                             total_fisicas += len(chunk)
 
@@ -2362,18 +2430,21 @@ elif st.session_state.pantalla == "CargaVentas":
                                     total_iguales += 1
 
                             if rows_to_write:
-                                resp = rpc_call(
-                                    "rpc_upsert_ventas_raw_batch",
-                                    {"p_batch_id": batch_id, "p_rows": rows_to_write},
-                                )
-
                                 written_ids: List[int] = []
-                                if isinstance(resp, dict):
-                                    written_ids = resp.get("written_ids", [])
-                                elif isinstance(resp, list) and resp:
-                                    first = resp[0]
-                                    if isinstance(first, dict):
-                                        written_ids = first.get("written_ids", [])
+                                _upsert_batch_size = 250
+                                for _ub_i in range(0, len(rows_to_write), _upsert_batch_size):
+                                    _ub_slice = rows_to_write[_ub_i : _ub_i + _upsert_batch_size]
+                                    resp = rpc_call(
+                                        "rpc_upsert_ventas_raw_batch",
+                                        {"p_batch_id": batch_id, "p_rows": _ub_slice},
+                                    )
+
+                                    if isinstance(resp, dict):
+                                        written_ids.extend(resp.get("written_ids", []))
+                                    elif isinstance(resp, list) and resp:
+                                        first = resp[0]
+                                        if isinstance(first, dict):
+                                            written_ids.extend(first.get("written_ids", []))
 
                                 total_subidas += len(rows_to_write)
 
@@ -2402,6 +2473,17 @@ elif st.session_state.pantalla == "CargaVentas":
                         },
                     )
 
+                    registrar_actividad(
+                        "subir_ventas_csv", "CargaVentas",
+                        {
+                            "archivo": analisis["file_name"],
+                            "insertadas": total_insertadas,
+                            "actualizadas": total_actualizadas,
+                            "sin_cambios": total_iguales,
+                            "estado": estado,
+                        },
+                    )
+
                     st.success("✅ Subida completada")
 
                     r1, r2, r3, r4, r5, r6 = st.columns(6)
@@ -2426,3 +2508,81 @@ elif st.session_state.pantalla == "CargaVentas":
 
                 except Exception as e:
                     st.error(f"Error en la subida: {e}")
+
+
+# =========================================================
+# AUDITORÍA
+# =========================================================
+
+elif st.session_state.pantalla == "Auditoria":
+    if not is_superadmin():
+        st.error("Solo el superadmin puede ver la auditoría.")
+        st.stop()
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📝 Registro de Auditoría")
+
+    _au_c1, _au_c2, _au_c3 = st.columns(3)
+    with _au_c1:
+        au_desde = st.date_input("Desde", value=datetime.date.today() - datetime.timedelta(days=7), key="au_desde")
+    with _au_c2:
+        au_hasta = st.date_input("Hasta", value=datetime.date.today(), key="au_hasta")
+    with _au_c3:
+        au_seccion = st.selectbox(
+            "Sección",
+            ["Todas"] + list(PANTALLA_LABELS.values()) + ["Auth"],
+            key="au_seccion",
+        )
+
+    # Map display label back to internal key
+    _seccion_filter = None
+    if au_seccion != "Todas":
+        # Check if it's an internal key already (like "Auth")
+        if au_seccion in (list(PANTALLA_LABELS.keys()) + ["Auth"]):
+            _seccion_filter = au_seccion
+        else:
+            # Reverse lookup from label to key
+            _rev = {v: k for k, v in PANTALLA_LABELS.items()}
+            _seccion_filter = _rev.get(au_seccion, au_seccion)
+
+    try:
+        _au_params: Dict[str, Any] = {
+            "p_limit": 200,
+            "p_offset": 0,
+            "p_desde": f"{au_desde}T00:00:00Z",
+            "p_hasta": f"{au_hasta}T23:59:59Z",
+        }
+        if _seccion_filter:
+            _au_params["p_seccion"] = _seccion_filter
+
+        _au_resp = rpc_call("rpc_obtener_audit_log", _au_params)
+
+        if isinstance(_au_resp, list) and _au_resp:
+            # Handle nested response
+            if isinstance(_au_resp[0], list):
+                _au_data = _au_resp[0]
+            else:
+                _au_data = _au_resp
+        else:
+            _au_data = []
+
+        if _au_data:
+            df_audit = pd.DataFrame(_au_data)
+            df_audit["ts"] = pd.to_datetime(df_audit["ts"]).dt.strftime("%d/%m/%Y %H:%M:%S")
+            df_audit = df_audit.rename(columns={
+                "ts": "Fecha/Hora",
+                "user_name": "Usuario",
+                "user_email": "Email",
+                "accion": "Acción",
+                "seccion": "Sección",
+                "detalle": "Detalle",
+            })
+            cols_show = ["Fecha/Hora", "Usuario", "Email", "Acción", "Sección", "Detalle"]
+            cols_show = [c for c in cols_show if c in df_audit.columns]
+
+            st.dataframe(df_audit[cols_show], use_container_width=True, hide_index=True)
+            st.caption(f"Mostrando {len(df_audit)} registros")
+        else:
+            st.info("No hay registros de auditoría para los filtros seleccionados.")
+
+    except Exception as e:
+        st.error(f"Error cargando auditoría: {e}")
