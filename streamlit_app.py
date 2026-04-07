@@ -1956,6 +1956,212 @@ elif st.session_state.pantalla == "BI":
     st.write("### Detalle por producto")
     st.dataframe(df_prod, use_container_width=True, hide_index=True)
 
+    # ── Análisis de Rentabilidad Horaria ──
+    st.divider()
+    st.write("### 💰 Análisis de Rentabilidad Horaria")
+    st.caption("Análisis del ingreso neto por día de la semana y franja horaria para optimizar horarios de apertura.")
+
+    df_rent = df_sales.copy()
+    df_rent["hora_num"] = pd.to_datetime(
+        df_rent["hora"], format="%H:%M:%S", errors="coerce"
+    ).dt.hour
+    df_rent["fecha_dt"] = pd.to_datetime(df_rent["fecha"])
+    df_rent["dia_semana_num"] = df_rent["fecha_dt"].dt.dayofweek  # 0=lun ... 6=dom
+    _dia_nombres = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+    df_rent["dia_semana"] = df_rent["dia_semana_num"].map(_dia_nombres)
+
+    if not df_rent.empty and "hora_num" in df_rent.columns:
+        # Contar semanas únicas por día de la semana para promediar
+        _semanas_por_dia = df_rent.groupby("dia_semana_num")["fecha_dt"].apply(
+            lambda x: x.dt.isocalendar().week.nunique()
+        ).to_dict()
+
+        # Agrupar por día y hora
+        df_dh = (
+            df_rent.groupby(["dia_semana_num", "dia_semana", "hora_num"], as_index=False)
+            .agg(venta_total=("neto", "sum"), unidades_total=("uds_v", "sum"), tickets=("ticket_uid", "nunique"))
+        )
+
+        # Calcular promedios semanales
+        df_dh["semanas"] = df_dh["dia_semana_num"].map(_semanas_por_dia)
+        df_dh["venta_media"] = (df_dh["venta_total"] / df_dh["semanas"]).round(2)
+        df_dh["tickets_media"] = (df_dh["tickets"] / df_dh["semanas"]).round(1)
+
+        # Parámetros de coste
+        _rent_c1, _rent_c2, _rent_c3 = st.columns(3)
+        with _rent_c1:
+            salario_total = st.number_input("Salario mensual total (€)", value=5700.0, step=100.0, key="rent_salario")
+        with _rent_c2:
+            n_empleados = st.number_input("Empleados", value=3, min_value=1, step=1, key="rent_empleados")
+        with _rent_c3:
+            horas_semana_emp = st.number_input("Horas/semana por empleado", value=36.0, step=1.0, key="rent_horas")
+
+        # Coste por hora de apertura (todas las personas presentes)
+        horas_mes_totales = n_empleados * horas_semana_emp * 4.33
+        coste_hora = salario_total / horas_mes_totales if horas_mes_totales > 0 else 0
+
+        st.info(f"**Coste laboral por hora de apertura:** {coste_hora:.2f}€/h "
+                f"({n_empleados} personas × {horas_semana_emp}h/sem × 4.33 sem/mes = {horas_mes_totales:.0f}h/mes)")
+
+        # Marcar rentabilidad
+        df_dh["coste_hora"] = coste_hora
+        df_dh["beneficio_neto"] = df_dh["venta_media"] - coste_hora
+        df_dh["rentable"] = df_dh["beneficio_neto"] > 0
+
+        # Heatmap: venta media por día y hora
+        _pivot_venta = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="venta_media", aggfunc="sum"
+        )
+        # Reordenar columnas por día de semana
+        _orden_dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        _pivot_venta = _pivot_venta[[d for d in _orden_dias if d in _pivot_venta.columns]]
+
+        fig_hm = px.imshow(
+            _pivot_venta,
+            labels=dict(x="Día", y="Hora", color="€ media/h"),
+            title="Venta media por hora y día de la semana (€)",
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+        )
+        fig_hm.update_yaxes(dtick=1)
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+        # Heatmap de beneficio neto (venta - coste laboral)
+        _pivot_benef = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="beneficio_neto", aggfunc="sum"
+        )
+        _pivot_benef = _pivot_benef[[d for d in _orden_dias if d in _pivot_benef.columns]]
+
+        fig_benef = px.imshow(
+            _pivot_benef,
+            labels=dict(x="Día", y="Hora", color="€ beneficio/h"),
+            title="Beneficio neto por hora (venta - coste laboral)",
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+            zmin=-coste_hora,
+        )
+        fig_benef.update_yaxes(dtick=1)
+        st.plotly_chart(fig_benef, use_container_width=True)
+
+        # Recomendación de horarios
+        st.write("### 📋 Recomendación de horarios")
+
+        _horario_actual = {
+            0: (8, 23),  # Lunes
+            1: (8, 23),  # Martes
+            2: (8, 23),  # Miércoles
+            3: (8, 23),  # Jueves
+            4: (8, 24),  # Viernes
+            5: (9, 23),  # Sábado
+            6: (9, 23),  # Domingo
+        }
+
+        _recomendaciones = []
+        _ahorro_total = 0.0
+        _perdida_total = 0.0
+
+        for dia_num in range(7):
+            dia_nombre = _dia_nombres[dia_num]
+            df_dia = df_dh[df_dh["dia_semana_num"] == dia_num].copy()
+
+            if df_dia.empty:
+                _recomendaciones.append({
+                    "Día": dia_nombre,
+                    "Horario actual": "Sin datos",
+                    "Horario recomendado": "Sin datos",
+                    "Horas actuales": 0,
+                    "Horas recomendadas": 0,
+                    "Ahorro estimado (€/sem)": 0,
+                })
+                continue
+
+            h_actual_ini, h_actual_fin = _horario_actual.get(dia_num, (8, 23))
+
+            # Horas rentables (beneficio neto > 0)
+            df_rentable = df_dia[df_dia["beneficio_neto"] > 0].sort_values("hora_num")
+
+            if df_rentable.empty:
+                rec_ini, rec_fin = h_actual_ini, h_actual_ini + 4  # mínimo 4h
+            else:
+                rec_ini = int(df_rentable["hora_num"].min())
+                rec_fin = int(df_rentable["hora_num"].max()) + 1
+
+                # No abrir antes de las 8 ni cerrar después de las 24
+                rec_ini = max(rec_ini, 8)
+                rec_fin = min(rec_fin, 24)
+
+                # Mínimo 8h de apertura
+                if (rec_fin - rec_ini) < 8:
+                    # Expandir hacia las horas con más venta
+                    while (rec_fin - rec_ini) < 8:
+                        if rec_ini > 8:
+                            rec_ini -= 1
+                        elif rec_fin < 24:
+                            rec_fin += 1
+                        else:
+                            break
+
+            horas_actual = h_actual_fin - h_actual_ini
+            horas_rec = rec_fin - rec_ini
+
+            # Calcular ventas perdidas en horas recortadas
+            horas_cortadas = set(range(h_actual_ini, h_actual_fin)) - set(range(rec_ini, rec_fin))
+            venta_perdida = df_dia[df_dia["hora_num"].isin(horas_cortadas)]["venta_media"].sum()
+            ahorro = len(horas_cortadas) * coste_hora - venta_perdida
+
+            _ahorro_total += max(ahorro, 0)
+            _perdida_total += venta_perdida
+
+            _recomendaciones.append({
+                "Día": dia_nombre,
+                "Horario actual": f"{h_actual_ini}:30 - {h_actual_fin}:30",
+                "Horario recomendado": f"{rec_ini}:00 - {rec_fin}:00",
+                "Horas actuales": horas_actual,
+                "Horas recomendadas": horas_rec,
+                "Ahorro coste (€/sem)": round(len(horas_cortadas) * coste_hora, 2),
+                "Venta perdida (€/sem)": round(venta_perdida, 2),
+                "Beneficio neto (€/sem)": round(max(ahorro, 0), 2),
+            })
+
+        df_rec = pd.DataFrame(_recomendaciones)
+        st.dataframe(df_rec, use_container_width=True, hide_index=True)
+
+        _horas_actual_sem = sum(r["Horas actuales"] for r in _recomendaciones)
+        _horas_rec_sem = sum(r["Horas recomendadas"] for r in _recomendaciones)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Horas/semana actual", f"{_horas_actual_sem}h")
+        m2.metric("Horas/semana recomendadas", f"{_horas_rec_sem}h", delta=f"{_horas_rec_sem - _horas_actual_sem}h")
+        m3.metric("Ahorro mensual estimado", f"{_ahorro_total * 4.33:.0f}€")
+        m4.metric("Coste hora apertura", f"{coste_hora:.2f}€/h")
+
+        # Detalle: tabla de venta media por hora y día
+        st.write("### 📊 Tabla detallada: venta media por hora (€)")
+        _pivot_detail = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana",
+            values=["venta_media", "tickets_media"],
+            aggfunc="sum",
+        )
+        _pivot_display = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="venta_media", aggfunc="sum"
+        ).fillna(0).round(2)
+        _pivot_display = _pivot_display[[d for d in _orden_dias if d in _pivot_display.columns]]
+        _pivot_display.index.name = "Hora"
+
+        # Colorear filas por debajo del coste
+        def _color_row(val):
+            if val < coste_hora and val > 0:
+                return "background-color: #FEE2E2"
+            elif val >= coste_hora:
+                return "background-color: #DCFCE7"
+            return ""
+
+        st.dataframe(
+            _pivot_display.style.map(_color_row),
+            use_container_width=True,
+        )
+        st.caption(f"🟢 Verde = venta > coste hora ({coste_hora:.2f}€) | 🔴 Rojo = venta < coste hora")
+
 
 # =========================================================
 # FORECAST
