@@ -861,24 +861,41 @@ def cargar_ventas_rango(
     fecha_fin: datetime.date,
     local_id: int,
 ) -> pd.DataFrame:
-    df = fetch_paginated(
-        "ventas_staging_v2",
-        columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
-        filters=[
-            {"op": "gte", "col": "fecha", "val": str(fecha_ini)},
-            {"op": "lte", "col": "fecha", "val": str(fecha_fin)},
-        ],
-        order_by="fecha",
-        page_size=1000,
-    )
+    # Split into 7-day windows to avoid connection drops on large ranges
+    _all_frames: List[pd.DataFrame] = []
+    _chunk_start = fecha_ini
 
-    if not df.empty:
-        df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
-        df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
-        df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
+    while _chunk_start <= fecha_fin:
+        _chunk_end = min(_chunk_start + datetime.timedelta(days=6), fecha_fin)
 
-        if "hora" in df.columns:
-            df["hora"] = df["hora"].astype(str).str.slice(0, 8)
+        _chunk_df = fetch_paginated(
+            "ventas_staging_v2",
+            columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
+            filters=[
+                {"op": "gte", "col": "fecha", "val": str(_chunk_start)},
+                {"op": "lte", "col": "fecha", "val": str(_chunk_end)},
+            ],
+            order_by="fecha",
+            page_size=1000,
+        )
+        if not _chunk_df.empty:
+            _all_frames.append(_chunk_df)
+
+        _chunk_start = _chunk_end + datetime.timedelta(days=1)
+        if _chunk_start <= fecha_fin:
+            time.sleep(0.3)
+
+    if not _all_frames:
+        return pd.DataFrame()
+
+    df = pd.concat(_all_frames, ignore_index=True)
+
+    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+    df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
+    df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
+
+    if "hora" in df.columns:
+        df["hora"] = df["hora"].astype(str).str.slice(0, 8)
 
     return df
 
