@@ -891,18 +891,22 @@ def cargar_ventas_rango(
 
     df = pd.concat(_all_frames, ignore_index=True)
 
-    # Deduplicate by business key (same sale imported multiple times gets different IDs)
-    _dedup_cols = ["fecha", "hora", "ticket_uid", "producto_id", "uds_v", "neto"]
-    _dedup_cols = [c for c in _dedup_cols if c in df.columns]
-    if _dedup_cols:
-        df = df.drop_duplicates(subset=_dedup_cols)
-
+    # Normalize BEFORE dedup so identical rows with slightly different formats match
     df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
     df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
     df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
-
     if "hora" in df.columns:
         df["hora"] = df["hora"].astype(str).str.slice(0, 8)
+
+    # Deduplicate: same CSV imported multiple times creates rows with different IDs
+    # Use ticket_uid + row_num as primary dedup key (unique per CSV line)
+    if "ticket_uid" in df.columns and "row_num" in df.columns:
+        df = df.drop_duplicates(subset=["ticket_uid", "row_num"])
+    else:
+        _dedup_cols = ["fecha", "hora", "ticket_uid", "producto_id", "uds_v", "neto"]
+        _dedup_cols = [c for c in _dedup_cols if c in df.columns]
+        if _dedup_cols:
+            df = df.drop_duplicates(subset=_dedup_cols)
 
     return df
 
@@ -2264,9 +2268,10 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay productos válidos para forecast con esos filtros.")
             st.stop()
 
-        fecha_ini_hist = fecha_pred - datetime.timedelta(days=365)
+        # Use 90 days of history (more relevant than 365)
+        fecha_ini_hist = fecha_pred - datetime.timedelta(days=90)
 
-        with st.spinner("Analizando histórico..."):
+        with st.spinner("Analizando histórico (últimos 90 días)..."):
             df_sales = cargar_ventas_rango(
                 fecha_ini_hist,
                 fecha_pred - datetime.timedelta(days=1),
@@ -2293,7 +2298,7 @@ elif st.session_state.pantalla == "Forecast":
         df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
         objetivo_dow = fecha_pred.weekday()
 
-        pct_map = {"Defensiva": 50, "Equilibrada": 75, "Agresiva": 88}
+        pct_map = {"Defensiva": 40, "Equilibrada": 60, "Agresiva": 80}
         pct = pct_map[estrategia]
 
         resultados: List[Dict[str, Any]] = []
@@ -2304,18 +2309,30 @@ elif st.session_state.pantalla == "Forecast":
 
             sub = df_daily[df_daily["producto_id"] == pid].copy()
             sub["dow"] = sub["fecha"].dt.weekday
-            hist = sub[sub["dow"] == objetivo_dow]["uds_v"]
+            hist_same_dow = sub[sub["dow"] == objetivo_dow].copy()
 
-            if hist.empty:
-                base = sub["uds_v"].mean() if not sub.empty else 0
+            if hist_same_dow.empty:
+                # Fallback: use all days
+                if not sub.empty:
+                    base = float(sub["uds_v"].median())
+                else:
+                    base = 0
             else:
-                base = float(np.percentile(hist, pct))
+                # Weight recent weeks more: last 4 weeks × 2, older × 1
+                _cutoff = pd.Timestamp(fecha_pred - datetime.timedelta(days=28))
+                recent = hist_same_dow[hist_same_dow["fecha"] >= _cutoff]["uds_v"]
+                older = hist_same_dow[hist_same_dow["fecha"] < _cutoff]["uds_v"]
+
+                if not recent.empty and not older.empty:
+                    # Weighted: 70% recent avg, 30% older percentile
+                    base = 0.7 * float(recent.mean()) + 0.3 * float(np.percentile(older, pct))
+                elif not recent.empty:
+                    base = float(recent.mean())
+                else:
+                    base = float(np.percentile(older, pct))
 
             if es_festivo:
                 base *= 1.15
-
-            if estrategia == "Agresiva":
-                base *= 1.05
 
             total = int(np.ceil(base))
             if total > 0:
