@@ -844,7 +844,8 @@ def aplicar_filtros_df(
     # Evitar columnas duplicadas al hacer merge
     cols_to_add = [c for c in dim_cols if c not in df.columns or c == "producto_id"]
 
-    out = df.merge(df_dim[cols_to_add], on="producto_id", how="left")
+    _dim_dedup = df_dim[cols_to_add].drop_duplicates(subset=["producto_id"])
+    out = df.merge(_dim_dedup, on="producto_id", how="left")
 
     if categorias_sel:
         out = out[out["categoria_nombre"].isin(categorias_sel)]
@@ -889,6 +890,10 @@ def cargar_ventas_rango(
         return pd.DataFrame()
 
     df = pd.concat(_all_frames, ignore_index=True)
+
+    # Deduplicate by id to prevent double-counting from overlapping imports
+    if "id" in df.columns:
+        df = df.drop_duplicates(subset=["id"])
 
     df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
     df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
