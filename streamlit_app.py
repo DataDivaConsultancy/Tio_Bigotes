@@ -891,9 +891,11 @@ def cargar_ventas_rango(
 
     df = pd.concat(_all_frames, ignore_index=True)
 
-    # Deduplicate by id to prevent double-counting from overlapping imports
-    if "id" in df.columns:
-        df = df.drop_duplicates(subset=["id"])
+    # Deduplicate by business key (same sale imported multiple times gets different IDs)
+    _dedup_cols = ["fecha", "hora", "ticket_uid", "producto_id", "uds_v", "neto"]
+    _dedup_cols = [c for c in _dedup_cols if c in df.columns]
+    if _dedup_cols:
+        df = df.drop_duplicates(subset=_dedup_cols)
 
     df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
     df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
