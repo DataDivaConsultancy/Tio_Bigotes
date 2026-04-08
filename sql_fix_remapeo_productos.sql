@@ -35,25 +35,29 @@ DROP TABLE IF EXISTS _tmp_mapeo_fix;
 CREATE TEMP TABLE _tmp_mapeo_fix AS
 
 -- 1a: Desde producto_aliases (mapeo manual ya resuelto)
-SELECT DISTINCT ON (alias_normalizado)
-  pa.alias_normalizado,
-  pa.producto_id
-FROM tb_v2.producto_aliases pa
-JOIN tb_v2.productos p ON pa.producto_id = p.id AND p.activo = TRUE
-ORDER BY alias_normalizado, pa.id DESC
+SELECT * FROM (
+  SELECT DISTINCT ON (alias_normalizado)
+    pa.alias_normalizado,
+    pa.producto_id
+  FROM tb_v2.producto_aliases pa
+  JOIN tb_v2.productos p ON pa.producto_id = p.id AND p.activo = TRUE
+  ORDER BY alias_normalizado, pa.id DESC
+) aliases
 
 UNION ALL
 
 -- 1b: Nombre normalizado del producto = alias
-SELECT DISTINCT ON (nombre_norm)
-  nombre_norm AS alias_normalizado,
-  id AS producto_id
-FROM (
-  SELECT id, UPPER(TRIM(nombre)) AS nombre_norm
-  FROM tb_v2.productos
-  WHERE activo = TRUE
-) sub
-ORDER BY nombre_norm, producto_id;
+SELECT * FROM (
+  SELECT DISTINCT ON (nombre_norm)
+    nombre_norm AS alias_normalizado,
+    id AS producto_id
+  FROM (
+    SELECT id, UPPER(TRIM(nombre)) AS nombre_norm
+    FROM tb_v2.productos
+    WHERE activo = TRUE
+  ) sub
+  ORDER BY nombre_norm, producto_id
+) nombres;
 
 -- Eliminar duplicados, priorizar alias manual (producto_aliases)
 DROP TABLE IF EXISTS _tmp_mapeo_unico;
