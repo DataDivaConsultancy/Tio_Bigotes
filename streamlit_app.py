@@ -2387,7 +2387,7 @@ elif st.session_state.pantalla == "Forecast":
         df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
 
         # Víspera de festivo → usar datos de viernes (dow=4)
-        objetivo_dow = 4 if es_vispera else fecha_pred.weekday()
+        objetivo_dow = fecha_pred.weekday()
 
         # ── Forecast engine with multi-variable weighting ──
         resultados: List[Dict[str, Any]] = []
