@@ -713,6 +713,7 @@ def fetch_paginated(
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     offset = 0
+    _max_retries = 3
 
     while True:
         q = conn.table(table_name).select(columns)
@@ -735,27 +736,37 @@ def fetch_paginated(
         if order_by:
             q = q.order(order_by)
 
-        try:
-            res = q.range(offset, offset + page_size - 1).execute()
-        except Exception as exc:
-            detail = ""
-            for attr in ["message", "details", "hint", "code"]:
-                val = getattr(exc, attr, None)
-                if val:
-                    detail += f" | {attr}: {val}"
-            st.error(
-                f"Error en consulta a '{table_name}' (offset={offset}, page_size={page_size}): "
-                f"{type(exc).__name__}: {exc}{detail}"
-            )
-            st.stop()
+        data = None
+        for _attempt in range(_max_retries):
+            try:
+                res = q.range(offset, offset + page_size - 1).execute()
+                data = res.data or []
+                break
+            except Exception as exc:
+                if _attempt < _max_retries - 1:
+                    time.sleep(1 * (_attempt + 1))
+                    continue
+                detail = ""
+                for attr in ["message", "details", "hint", "code"]:
+                    val = getattr(exc, attr, None)
+                    if val:
+                        detail += f" | {attr}: {val}"
+                st.error(
+                    f"Error en consulta a '{table_name}' (offset={offset}, page_size={page_size}): "
+                    f"{type(exc).__name__}: {exc}{detail}"
+                )
+                st.stop()
 
-        data = res.data or []
         rows.extend(data)
 
         if len(data) < page_size:
             break
 
         offset += page_size
+
+        # Small pause every 10 pages to avoid connection exhaustion
+        if (offset // page_size) % 10 == 0:
+            time.sleep(0.5)
 
     return pd.DataFrame(rows)
 
@@ -833,7 +844,8 @@ def aplicar_filtros_df(
     # Evitar columnas duplicadas al hacer merge
     cols_to_add = [c for c in dim_cols if c not in df.columns or c == "producto_id"]
 
-    out = df.merge(df_dim[cols_to_add], on="producto_id", how="left")
+    _dim_dedup = df_dim[cols_to_add].drop_duplicates(subset=["producto_id"])
+    out = df.merge(_dim_dedup, on="producto_id", how="left")
 
     if categorias_sel:
         out = out[out["categoria_nombre"].isin(categorias_sel)]
@@ -850,24 +862,51 @@ def cargar_ventas_rango(
     fecha_fin: datetime.date,
     local_id: int,
 ) -> pd.DataFrame:
-    df = fetch_paginated(
-        "ventas_staging_v2",
-        columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
-        filters=[
-            {"op": "gte", "col": "fecha", "val": str(fecha_ini)},
-            {"op": "lte", "col": "fecha", "val": str(fecha_fin)},
-        ],
-        order_by="fecha",
-        page_size=1000,
-    )
+    # Split into 7-day windows to avoid connection drops on large ranges
+    _all_frames: List[pd.DataFrame] = []
+    _chunk_start = fecha_ini
 
-    if not df.empty:
-        df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
-        df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
-        df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
+    while _chunk_start <= fecha_fin:
+        _chunk_end = min(_chunk_start + datetime.timedelta(days=6), fecha_fin)
 
-        if "hora" in df.columns:
-            df["hora"] = df["hora"].astype(str).str.slice(0, 8)
+        _chunk_df = fetch_paginated(
+            "ventas_staging_v2",
+            columns="id,batch_id,raw_id,row_num,fecha,hora,fecha_hora,ticket_uid,producto_id,uds_v,neto,estado_mapeo",
+            filters=[
+                {"op": "gte", "col": "fecha", "val": str(_chunk_start)},
+                {"op": "lte", "col": "fecha", "val": str(_chunk_end)},
+            ],
+            order_by="fecha",
+            page_size=1000,
+        )
+        if not _chunk_df.empty:
+            _all_frames.append(_chunk_df)
+
+        _chunk_start = _chunk_end + datetime.timedelta(days=1)
+        if _chunk_start <= fecha_fin:
+            time.sleep(0.3)
+
+    if not _all_frames:
+        return pd.DataFrame()
+
+    df = pd.concat(_all_frames, ignore_index=True)
+
+    # Normalize BEFORE dedup so identical rows with slightly different formats match
+    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+    df["uds_v"] = pd.to_numeric(df["uds_v"], errors="coerce").fillna(0)
+    df["neto"] = pd.to_numeric(df["neto"], errors="coerce").fillna(0)
+    if "hora" in df.columns:
+        df["hora"] = df["hora"].astype(str).str.slice(0, 8)
+
+    # Deduplicate: same CSV imported multiple times creates rows with different IDs
+    # Use ticket_uid + row_num as primary dedup key (unique per CSV line)
+    if "ticket_uid" in df.columns and "row_num" in df.columns:
+        df = df.drop_duplicates(subset=["ticket_uid", "row_num"])
+    else:
+        _dedup_cols = ["fecha", "hora", "ticket_uid", "producto_id", "uds_v", "neto"]
+        _dedup_cols = [c for c in _dedup_cols if c in df.columns]
+        if _dedup_cols:
+            df = df.drop_duplicates(subset=_dedup_cols)
 
     return df
 
@@ -1956,6 +1995,212 @@ elif st.session_state.pantalla == "BI":
     st.write("### Detalle por producto")
     st.dataframe(df_prod, use_container_width=True, hide_index=True)
 
+    # ── Análisis de Rentabilidad Horaria ──
+    st.divider()
+    st.write("### 💰 Análisis de Rentabilidad Horaria")
+    st.caption("Análisis del ingreso neto por día de la semana y franja horaria para optimizar horarios de apertura.")
+
+    df_rent = df_sales.copy()
+    df_rent["hora_num"] = pd.to_datetime(
+        df_rent["hora"], format="%H:%M:%S", errors="coerce"
+    ).dt.hour
+    df_rent["fecha_dt"] = pd.to_datetime(df_rent["fecha"])
+    df_rent["dia_semana_num"] = df_rent["fecha_dt"].dt.dayofweek  # 0=lun ... 6=dom
+    _dia_nombres = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+    df_rent["dia_semana"] = df_rent["dia_semana_num"].map(_dia_nombres)
+
+    if not df_rent.empty and "hora_num" in df_rent.columns:
+        # Contar semanas únicas por día de la semana para promediar
+        _semanas_por_dia = df_rent.groupby("dia_semana_num")["fecha_dt"].apply(
+            lambda x: x.dt.isocalendar().week.nunique()
+        ).to_dict()
+
+        # Agrupar por día y hora
+        df_dh = (
+            df_rent.groupby(["dia_semana_num", "dia_semana", "hora_num"], as_index=False)
+            .agg(venta_total=("neto", "sum"), unidades_total=("uds_v", "sum"), tickets=("ticket_uid", "nunique"))
+        )
+
+        # Calcular promedios semanales
+        df_dh["semanas"] = df_dh["dia_semana_num"].map(_semanas_por_dia)
+        df_dh["venta_media"] = (df_dh["venta_total"] / df_dh["semanas"]).round(2)
+        df_dh["tickets_media"] = (df_dh["tickets"] / df_dh["semanas"]).round(1)
+
+        # Parámetros de coste
+        _rent_c1, _rent_c2, _rent_c3 = st.columns(3)
+        with _rent_c1:
+            salario_total = st.number_input("Salario mensual total (€)", value=5700.0, step=100.0, key="rent_salario")
+        with _rent_c2:
+            n_empleados = st.number_input("Empleados", value=3, min_value=1, step=1, key="rent_empleados")
+        with _rent_c3:
+            horas_semana_emp = st.number_input("Horas/semana por empleado", value=36.0, step=1.0, key="rent_horas")
+
+        # Coste por hora de apertura (todas las personas presentes)
+        horas_mes_totales = n_empleados * horas_semana_emp * 4.33
+        coste_hora = salario_total / horas_mes_totales if horas_mes_totales > 0 else 0
+
+        st.info(f"**Coste laboral por hora de apertura:** {coste_hora:.2f}€/h "
+                f"({n_empleados} personas × {horas_semana_emp}h/sem × 4.33 sem/mes = {horas_mes_totales:.0f}h/mes)")
+
+        # Marcar rentabilidad
+        df_dh["coste_hora"] = coste_hora
+        df_dh["beneficio_neto"] = df_dh["venta_media"] - coste_hora
+        df_dh["rentable"] = df_dh["beneficio_neto"] > 0
+
+        # Heatmap: venta media por día y hora
+        _pivot_venta = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="venta_media", aggfunc="sum"
+        )
+        # Reordenar columnas por día de semana
+        _orden_dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        _pivot_venta = _pivot_venta[[d for d in _orden_dias if d in _pivot_venta.columns]]
+
+        fig_hm = px.imshow(
+            _pivot_venta,
+            labels=dict(x="Día", y="Hora", color="€ media/h"),
+            title="Venta media por hora y día de la semana (€)",
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+        )
+        fig_hm.update_yaxes(dtick=1)
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+        # Heatmap de beneficio neto (venta - coste laboral)
+        _pivot_benef = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="beneficio_neto", aggfunc="sum"
+        )
+        _pivot_benef = _pivot_benef[[d for d in _orden_dias if d in _pivot_benef.columns]]
+
+        fig_benef = px.imshow(
+            _pivot_benef,
+            labels=dict(x="Día", y="Hora", color="€ beneficio/h"),
+            title="Beneficio neto por hora (venta - coste laboral)",
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+            zmin=-coste_hora,
+        )
+        fig_benef.update_yaxes(dtick=1)
+        st.plotly_chart(fig_benef, use_container_width=True)
+
+        # Recomendación de horarios
+        st.write("### 📋 Recomendación de horarios")
+
+        _horario_actual = {
+            0: (8, 23),  # Lunes
+            1: (8, 23),  # Martes
+            2: (8, 23),  # Miércoles
+            3: (8, 23),  # Jueves
+            4: (8, 24),  # Viernes
+            5: (9, 23),  # Sábado
+            6: (9, 23),  # Domingo
+        }
+
+        _recomendaciones = []
+        _ahorro_total = 0.0
+        _perdida_total = 0.0
+
+        for dia_num in range(7):
+            dia_nombre = _dia_nombres[dia_num]
+            df_dia = df_dh[df_dh["dia_semana_num"] == dia_num].copy()
+
+            if df_dia.empty:
+                _recomendaciones.append({
+                    "Día": dia_nombre,
+                    "Horario actual": "Sin datos",
+                    "Horario recomendado": "Sin datos",
+                    "Horas actuales": 0,
+                    "Horas recomendadas": 0,
+                    "Ahorro estimado (€/sem)": 0,
+                })
+                continue
+
+            h_actual_ini, h_actual_fin = _horario_actual.get(dia_num, (8, 23))
+
+            # Horas rentables (beneficio neto > 0)
+            df_rentable = df_dia[df_dia["beneficio_neto"] > 0].sort_values("hora_num")
+
+            if df_rentable.empty:
+                rec_ini, rec_fin = h_actual_ini, h_actual_ini + 4  # mínimo 4h
+            else:
+                rec_ini = int(df_rentable["hora_num"].min())
+                rec_fin = int(df_rentable["hora_num"].max()) + 1
+
+                # No abrir antes de las 8 ni cerrar después de las 24
+                rec_ini = max(rec_ini, 8)
+                rec_fin = min(rec_fin, 24)
+
+                # Mínimo 8h de apertura
+                if (rec_fin - rec_ini) < 8:
+                    # Expandir hacia las horas con más venta
+                    while (rec_fin - rec_ini) < 8:
+                        if rec_ini > 8:
+                            rec_ini -= 1
+                        elif rec_fin < 24:
+                            rec_fin += 1
+                        else:
+                            break
+
+            horas_actual = h_actual_fin - h_actual_ini
+            horas_rec = rec_fin - rec_ini
+
+            # Calcular ventas perdidas en horas recortadas
+            horas_cortadas = set(range(h_actual_ini, h_actual_fin)) - set(range(rec_ini, rec_fin))
+            venta_perdida = df_dia[df_dia["hora_num"].isin(horas_cortadas)]["venta_media"].sum()
+            ahorro = len(horas_cortadas) * coste_hora - venta_perdida
+
+            _ahorro_total += max(ahorro, 0)
+            _perdida_total += venta_perdida
+
+            _recomendaciones.append({
+                "Día": dia_nombre,
+                "Horario actual": f"{h_actual_ini}:30 - {h_actual_fin}:30",
+                "Horario recomendado": f"{rec_ini}:00 - {rec_fin}:00",
+                "Horas actuales": horas_actual,
+                "Horas recomendadas": horas_rec,
+                "Ahorro coste (€/sem)": round(len(horas_cortadas) * coste_hora, 2),
+                "Venta perdida (€/sem)": round(venta_perdida, 2),
+                "Beneficio neto (€/sem)": round(max(ahorro, 0), 2),
+            })
+
+        df_rec = pd.DataFrame(_recomendaciones)
+        st.dataframe(df_rec, use_container_width=True, hide_index=True)
+
+        _horas_actual_sem = sum(r["Horas actuales"] for r in _recomendaciones)
+        _horas_rec_sem = sum(r["Horas recomendadas"] for r in _recomendaciones)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Horas/semana actual", f"{_horas_actual_sem}h")
+        m2.metric("Horas/semana recomendadas", f"{_horas_rec_sem}h", delta=f"{_horas_rec_sem - _horas_actual_sem}h")
+        m3.metric("Ahorro mensual estimado", f"{_ahorro_total * 4.33:.0f}€")
+        m4.metric("Coste hora apertura", f"{coste_hora:.2f}€/h")
+
+        # Detalle: tabla de venta media por hora y día
+        st.write("### 📊 Tabla detallada: venta media por hora (€)")
+        _pivot_detail = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana",
+            values=["venta_media", "tickets_media"],
+            aggfunc="sum",
+        )
+        _pivot_display = df_dh.pivot_table(
+            index="hora_num", columns="dia_semana", values="venta_media", aggfunc="sum"
+        ).fillna(0).round(2)
+        _pivot_display = _pivot_display[[d for d in _orden_dias if d in _pivot_display.columns]]
+        _pivot_display.index.name = "Hora"
+
+        # Colorear filas por debajo del coste
+        def _color_row(val):
+            if val < coste_hora and val > 0:
+                return "background-color: #FEE2E2"
+            elif val >= coste_hora:
+                return "background-color: #DCFCE7"
+            return ""
+
+        st.dataframe(
+            _pivot_display.style.map(_color_row),
+            use_container_width=True,
+        )
+        st.caption(f"🟢 Verde = venta > coste hora ({coste_hora:.2f}€) | 🔴 Rojo = venta < coste hora")
+
 
 # =========================================================
 # FORECAST
@@ -1968,6 +2213,39 @@ elif st.session_state.pantalla == "Forecast":
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
     st.header("🧠 Forecast de Horneado")
 
+    # ── Festivos España / Cataluña / Barcelona ──
+    _FESTIVOS_ES: set = set()
+    for _yr in range(2023, 2028):
+        _FESTIVOS_ES.update([
+            datetime.date(_yr, 1, 1),    # Año Nuevo
+            datetime.date(_yr, 1, 6),    # Reyes
+            datetime.date(_yr, 5, 1),    # Trabajo
+            datetime.date(_yr, 8, 15),   # Asunción
+            datetime.date(_yr, 10, 12),  # Hispanidad
+            datetime.date(_yr, 11, 1),   # Todos los Santos
+            datetime.date(_yr, 12, 6),   # Constitución
+            datetime.date(_yr, 12, 8),   # Inmaculada
+            datetime.date(_yr, 12, 25),  # Navidad
+            datetime.date(_yr, 12, 26),  # Sant Esteve (CAT)
+            datetime.date(_yr, 6, 24),   # Sant Joan (CAT)
+            datetime.date(_yr, 9, 11),   # Diada (CAT)
+            datetime.date(_yr, 9, 24),   # Mercè (BCN)
+        ])
+    # Semana Santa (fechas variables)
+    _FESTIVOS_ES.update([
+        datetime.date(2023, 4, 7), datetime.date(2023, 4, 10),
+        datetime.date(2024, 3, 29), datetime.date(2024, 4, 1),
+        datetime.date(2025, 4, 18), datetime.date(2025, 4, 21),
+        datetime.date(2026, 4, 3), datetime.date(2026, 4, 6),
+        datetime.date(2027, 3, 26), datetime.date(2027, 3, 29),
+    ])
+
+    def _es_festivo(fecha: datetime.date) -> bool:
+        return fecha in _FESTIVOS_ES
+
+    def _es_vispera_festivo(fecha: datetime.date) -> bool:
+        return (fecha + datetime.timedelta(days=1)) in _FESTIVOS_ES
+
     c1, c2, c3 = st.columns(3)
     fecha_pred = c1.date_input("Fecha objetivo", datetime.date.today())
     estrategia = c2.select_slider(
@@ -1975,14 +2253,6 @@ elif st.session_state.pantalla == "Forecast":
         options=["Defensiva", "Equilibrada", "Agresiva"],
         value="Equilibrada",
     )
-    tipo_dia = c3.radio(
-        "Tipo de día",
-        ["Normal", "Víspera festivo", "Festivo / Puente"],
-        horizontal=True,
-    )
-    es_festivo = tipo_dia == "Festivo / Puente"
-    es_vispera = tipo_dia == "Víspera festivo"
-
     st.subheader("Filtros")
     categorias_sel, productos_sel = filtros_categoria_producto(
         DF_DIM,
@@ -2029,9 +2299,11 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay productos válidos para forecast con esos filtros.")
             st.stop()
 
-        fecha_ini_hist = fecha_pred - datetime.timedelta(days=365)
+        # ── Load ALL historical data for best prediction ──
+        # Find earliest available data (up to 3 years back)
+        fecha_ini_hist = fecha_pred - datetime.timedelta(days=3 * 365)
 
-        with st.spinner("Analizando histórico..."):
+        with st.spinner("Analizando todo el histórico de ventas..."):
             df_sales = cargar_ventas_rango(
                 fecha_ini_hist,
                 fecha_pred - datetime.timedelta(days=1),
@@ -2042,11 +2314,13 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay histórico suficiente.")
             st.stop()
 
-        df_sales = df_sales.merge(
-            df_forecast_dim[["producto_id", "producto_nombre"]],
-            on="producto_id",
-            how="inner",
-        )
+        # Merge with dim to get producto_nombre, categoria, uds_equivalentes
+        _merge_cols = ["producto_id", "producto_nombre", "categoria_nombre"]
+        if "uds_equivalentes_empanadas" in df_forecast_dim.columns:
+            _merge_cols.append("uds_equivalentes_empanadas")
+        _dim_merge = df_forecast_dim[_merge_cols].drop_duplicates(subset=["producto_id"])
+
+        df_sales = df_sales.merge(_dim_merge, on="producto_id", how="inner")
 
         if df_sales.empty:
             st.warning("No hay ventas históricas para esos productos.")
@@ -2115,16 +2389,18 @@ elif st.session_state.pantalla == "Forecast":
         # Víspera de festivo → usar datos de viernes (dow=4)
         objetivo_dow = 4 if es_vispera else fecha_pred.weekday()
 
-        pct_map = {"Defensiva": 50, "Equilibrada": 75, "Agresiva": 88}
-        pct = pct_map[estrategia]
-
+        # ── Forecast engine with multi-variable weighting ──
         resultados: List[Dict[str, Any]] = []
 
         for _, p in df_forecast_dim.iterrows():
             pid = p["producto_id"]
             nombre = p["producto_nombre"]
+            eq_emp = float(p.get("uds_equivalentes_empanadas", 0) or 0)
 
             sub = df_daily[df_daily["producto_id"] == pid].copy()
+            if sub.empty:
+                continue
+
             sub["dow"] = sub["fecha"].dt.weekday
             sub_dow = sub[sub["dow"] == objetivo_dow][["fecha", "uds_v"]]
 
@@ -2135,32 +2411,51 @@ elif st.session_state.pantalla == "Forecast":
 
             total = int(np.ceil(base))
             if total > 0:
-                resultados.append(
-                    {
-                        "Producto": nombre,
-                        "Total sugerido": total,
-                        "Tanda 1": int(np.ceil(total * 0.7)),
-                        "Tanda 2": int(np.floor(total * 0.3)),
-                    }
-                )
+                row_data = {
+                    "Producto": nombre,
+                    "Uds estimadas": total,
+                    "Tanda 1 (70%)": int(np.ceil(total * 0.7)),
+                    "Tanda 2 (30%)": int(np.floor(total * 0.3)),
+                    "Días históricos": len(hist_dow),
+                }
+                if eq_emp > 0:
+                    row_data["Eq. empanadas"] = int(np.ceil(total * eq_emp))
+                resultados.append(row_data)
 
         if not resultados:
             st.warning("No pude generar forecast.")
             st.stop()
 
-        df_res = pd.DataFrame(resultados).sort_values("Total sugerido", ascending=False)
+        df_res = pd.DataFrame(resultados).sort_values("Uds estimadas", ascending=False)
 
-        st.success(f"✅ Forecast generado | Total sugerido: {df_res['Total sugerido'].sum()} uds")
+        # ── Summary metrics ──
+        total_uds = df_res["Uds estimadas"].sum()
+        total_emp = df_res["Eq. empanadas"].sum() if "Eq. empanadas" in df_res.columns else 0
+
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        _m1.metric("Total unidades", f"{total_uds}")
+        if total_emp > 0:
+            _m2.metric("Total eq. empanadas", f"{total_emp}")
+        _m3.metric("Productos", f"{len(df_res)}")
+        _m4.metric("Estrategia", estrategia)
+
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
+        # ── WhatsApp text ──
         txt = f"*PLAN DE HORNEADO - {fecha_pred.strftime('%d/%m/%Y')}*\n"
-        txt += f"Estrategia: {estrategia} | Festivo: {'Sí' if es_festivo else 'No'}\n"
-        txt += "-" * 25 + "\n"
+        _dow_names = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+        txt += f"{_dow_names.get(fecha_pred.weekday(), '')} | {estrategia}"
+        if es_festivo:
+            txt += " | FESTIVO"
+        txt += "\n" + "-" * 25 + "\n"
 
         for _, r in df_res.iterrows():
-            txt += (
-                f"• {r['Producto']}: {r['Tanda 1']} + {r['Tanda 2']} = *{r['Total sugerido']}*\n"
-            )
+            txt += f"• {r['Producto']}: {r['Tanda 1 (70%)']} + {r['Tanda 2 (30%)']} = *{r['Uds estimadas']}*\n"
+
+        txt += "-" * 25 + "\n"
+        txt += f"*TOTAL: {total_uds} uds*"
+        if total_emp > 0:
+            txt += f" | *{total_emp} eq. empanadas*"
 
         st.text_area("Texto para WhatsApp", txt, height=300)
 
