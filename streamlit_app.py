@@ -2253,17 +2253,6 @@ elif st.session_state.pantalla == "Forecast":
         options=["Defensiva", "Equilibrada", "Agresiva"],
         value="Equilibrada",
     )
-    _auto_festivo = _es_festivo(fecha_pred)
-    es_festivo = c3.toggle(
-        "Festivo / Puente",
-        value=_auto_festivo,
-        help="Auto-detectado" if _auto_festivo else "Activar manualmente si es puente",
-    )
-    if _auto_festivo:
-        st.info(f"📅 {fecha_pred.strftime('%d/%m/%Y')} es festivo (auto-detectado)")
-    elif _es_vispera_festivo(fecha_pred):
-        st.info(f"📅 Víspera de festivo — considera ajustar al alza")
-
     st.subheader("Filtros")
     categorias_sel, productos_sel = filtros_categoria_producto(
         DF_DIM,
@@ -2337,13 +2326,68 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No hay ventas históricas para esos productos.")
             st.stop()
 
-        # ── Use UDS_V (units sold), NOT neto ──
+        # -------------------------------------------------
+        # Motor de forecast v2 - con detección de outliers,
+        # peso por recencia y ajuste de tendencia
+        # -------------------------------------------------
+        def _forecast_producto(sub_dow_df, pct, es_festivo, fecha_obj):
+            """Calcula forecast para un producto usando datos del mismo día de semana."""
+            if sub_dow_df.empty:
+                return 0.0
+            sub = sub_dow_df.sort_values("fecha")
+            vals = sub["uds_v"].values.astype(float)
+            fechas = pd.to_datetime(sub["fecha"]).values
+
+            # 1) Detección de outliers (IQR)
+            q1, q3 = np.percentile(vals, [25, 75])
+            iqr = q3 - q1
+            if iqr < 1:
+                iqr = max(q3 * 0.3, 1)
+            lower = max(0, q1 - 1.5 * iqr)
+            upper = q3 + 1.5 * iqr
+            is_normal = (vals >= lower) & (vals <= upper)
+
+            # 2) Modo festivo: usar días atípicos altos
+            if es_festivo:
+                high = vals[vals > upper]
+                if len(high) >= 2:
+                    return float(np.percentile(high, min(pct, 75)))
+                nv = vals[is_normal] if is_normal.sum() >= 3 else vals
+                return float(np.percentile(nv, pct)) * 1.25
+
+            # 3) Días normales (sin outliers)
+            nv = vals[is_normal]
+            nf = fechas[is_normal]
+            if len(nv) < 3:
+                nv = vals
+                nf = fechas
+
+            # 4) Peso por recencia: recientes pesan 3x, medios 2x, viejos 1x
+            fecha_np = np.datetime64(fecha_obj)
+            dias_atras = (fecha_np - nf).astype("timedelta64[D]").astype(float)
+            semanas = dias_atras / 7.0
+            pesos = np.where(semanas <= 8, 3, np.where(semanas <= 16, 2, 1)).astype(int)
+            repetidos = np.repeat(nv, pesos)
+            if len(repetidos) == 0:
+                return 0.0
+            base = float(np.percentile(repetidos, pct))
+
+            # 5) Ajuste por tendencia (últimas 4 semanas vs promedio general)
+            rec = nv[semanas <= 4]
+            if len(rec) >= 2 and nv.mean() > 0:
+                ratio = rec.mean() / nv.mean()
+                factor = max(0.80, min(1.20, ratio))
+                base *= factor
+
+            return base
+
         df_daily = df_sales.groupby(
             ["fecha", "producto_id", "producto_nombre"], as_index=False
         )["uds_v"].sum()
         df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
-        objetivo_dow = fecha_pred.weekday()
-        objetivo_month = fecha_pred.month
+
+        # Víspera de festivo → usar datos de viernes (dow=4)
+        objetivo_dow = 4 if es_vispera else fecha_pred.weekday()
 
         # ── Forecast engine with multi-variable weighting ──
         resultados: List[Dict[str, Any]] = []
@@ -2358,57 +2402,12 @@ elif st.session_state.pantalla == "Forecast":
                 continue
 
             sub["dow"] = sub["fecha"].dt.weekday
-            sub["month"] = sub["fecha"].dt.month
-            sub["days_ago"] = (fecha_pred_ts - sub["fecha"]).dt.days
+            sub_dow = sub[sub["dow"] == objetivo_dow][["fecha", "uds_v"]]
 
-            # Filter same day of week
-            hist_dow = sub[sub["dow"] == objetivo_dow].copy()
+            if sub_dow.empty:
+                sub_dow = sub[["fecha", "uds_v"]]
 
-            if hist_dow.empty:
-                continue
-
-            # ── Calculate weights for each historical day ──
-            # 1. Recency: exponential decay (recent = more weight)
-            hist_dow["w_recency"] = np.exp(-hist_dow["days_ago"] / 60)  # 60-day half-life
-
-            # 2. Same month bonus (seasonal similarity)
-            hist_dow["w_season"] = hist_dow["month"].apply(
-                lambda m: 1.5 if m == objetivo_month else (
-                    1.2 if abs(m - objetivo_month) <= 1 or abs(m - objetivo_month) >= 11 else 1.0
-                )
-            )
-
-            # 3. Festivo similarity
-            hist_dow["_is_festivo"] = hist_dow["fecha"].apply(lambda d: _es_festivo(d.date()))
-            if es_festivo:
-                hist_dow["w_festivo"] = hist_dow["_is_festivo"].apply(lambda f: 2.0 if f else 0.5)
-            else:
-                hist_dow["w_festivo"] = hist_dow["_is_festivo"].apply(lambda f: 0.5 if f else 1.0)
-
-            # Combined weight
-            hist_dow["weight"] = hist_dow["w_recency"] * hist_dow["w_season"] * hist_dow["w_festivo"]
-
-            # ── Weighted average ──
-            total_weight = hist_dow["weight"].sum()
-            if total_weight > 0:
-                weighted_avg = (hist_dow["uds_v"] * hist_dow["weight"]).sum() / total_weight
-            else:
-                weighted_avg = hist_dow["uds_v"].mean()
-
-            # ── Strategy adjustment ──
-            if estrategia == "Defensiva":
-                # Below weighted avg to minimize waste
-                base = weighted_avg * 0.85
-            elif estrategia == "Agresiva":
-                # Above weighted avg to minimize stockouts
-                base = weighted_avg * 1.15
-            else:
-                # Balanced
-                base = weighted_avg
-
-            # Festivo boost (on top of festivo weighting)
-            if es_festivo:
-                base *= 1.10
+            base = _forecast_producto(sub_dow, pct, es_festivo, fecha_pred)
 
             total = int(np.ceil(base))
             if total > 0:
