@@ -2291,6 +2291,81 @@ elif st.session_state.pantalla == "Forecast":
         except Exception:
             stock_hoy = {}
 
+        _dim_merge = df_forecast_dim[_merge_cols].drop_duplicates(subset=["producto_id"])
+
+        df_sales = df_sales.merge(_dim_merge, on="producto_id", how="inner")
+
+        if df_sales.empty:
+            st.warning("No hay ventas históricas para esos productos.")
+            st.stop()
+
+        # -------------------------------------------------
+        # Motor de forecast v2 - con detección de outliers,
+        # peso por recencia y ajuste de tendencia
+        # -------------------------------------------------
+        def _forecast_producto(sub_dow_df, pct, es_festivo, fecha_obj):
+            """Calcula forecast para un producto usando datos del mismo día de semana."""
+            if sub_dow_df.empty:
+                return 0.0
+            sub = sub_dow_df.sort_values("fecha")
+            vals = sub["uds_v"].values.astype(float)
+            fechas = pd.to_datetime(sub["fecha"]).values
+
+            # 1) Detección de outliers (IQR)
+            q1, q3 = np.percentile(vals, [25, 75])
+            iqr = q3 - q1
+            if iqr < 1:
+                iqr = max(q3 * 0.3, 1)
+            lower = max(0, q1 - 1.5 * iqr)
+            upper = q3 + 1.5 * iqr
+            is_normal = (vals >= lower) & (vals <= upper)
+
+            # 2) Modo festivo: usar días atípicos altos
+            if es_festivo:
+                high = vals[vals > upper]
+                if len(high) >= 2:
+                    return float(np.percentile(high, min(pct, 75)))
+                nv = vals[is_normal] if is_normal.sum() >= 3 else vals
+                return float(np.percentile(nv, pct)) * 1.25
+
+            # 3) Días normales (sin outliers)
+            nv = vals[is_normal]
+            nf = fechas[is_normal]
+            if len(nv) < 3:
+                nv = vals
+                nf = fechas
+
+            # 4) Peso por recencia: recientes pesan 3x, medios 2x, viejos 1x
+            fecha_np = np.datetime64(fecha_obj)
+            dias_atras = (fecha_np - nf).astype("timedelta64[D]").astype(float)
+            semanas = dias_atras / 7.0
+            pesos = np.where(semanas <= 8, 3, np.where(semanas <= 16, 2, 1)).astype(int)
+            repetidos = np.repeat(nv, pesos)
+            if len(repetidos) == 0:
+                return 0.0
+            base = float(np.percentile(repetidos, pct))
+
+            # 5) Ajuste por tendencia (últimas 4 semanas vs promedio general)
+            rec = nv[semanas <= 4]
+            if len(rec) >= 2 and nv.mean() > 0:
+                ratio = rec.mean() / nv.mean()
+                factor = max(0.80, min(1.20, ratio))
+                base *= factor
+
+            return base
+
+        df_daily = df_sales.groupby(
+            ["fecha", "producto_id", "producto_nombre"], as_index=False
+        )["uds_v"].sum()
+        df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
+
+        # Víspera de festivo → usar datos de viernes (dow=4)
+        objetivo_dow = fecha_pred.weekday()
+
+        # ── Forecast engine with multi-variable weighting ──
+        resultados: List[Dict[str, Any]] = []
+
+
         # ── Forecast por producto ──
         resultados: List[Dict[str, Any]] = []
         for _, p in df_forecast_dim.iterrows():
