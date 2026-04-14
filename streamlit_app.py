@@ -2263,137 +2263,38 @@ elif st.session_state.pantalla == "Forecast":
     )
 
     if st.button("🚀 Calcular forecast"):
-        df_forecast_dim = DF_DIM.copy()
-        df_forecast_dim = df_forecast_dim[
-            (df_forecast_dim["activo"] == True)
-            & (df_forecast_dim["visible_en_forecast"] == True)
-            & (df_forecast_dim["afecta_forecast"] == True)
-        ]
+        # ── Detectar contexto de festivo y víspera ──
+        es_festivo_flag = _es_festivo(fecha_pred)
+        es_vispera_flag = _es_vispera_festivo(fecha_pred)
 
-        fecha_pred_ts = pd.to_datetime(fecha_pred)
+        # ── Mapear estrategia a percentil objetivo ──
+        PCT_ESTRATEGIA = {"Defensiva": 50, "Equilibrada": 65, "Agresiva": 80}
+        pct = PCT_ESTRATEGIA[estrategia]
 
-        if "fecha_inicio_venta" in df_forecast_dim.columns:
-            df_forecast_dim["fecha_inicio_venta"] = pd.to_datetime(
-                df_forecast_dim["fecha_inicio_venta"], errors="coerce"
-            )
-            df_forecast_dim = df_forecast_dim[
-                df_forecast_dim["fecha_inicio_venta"].isna()
-                | (df_forecast_dim["fecha_inicio_venta"] <= fecha_pred_ts)
-            ]
+        # ── Buffer de seguridad (30% que queda al cierre del día) ──
+        BUFFER_PCT = 0.30
+        UDS_POR_HORNADA = 60
 
-        if "fecha_fin_venta" in df_forecast_dim.columns:
-            df_forecast_dim["fecha_fin_venta"] = pd.to_datetime(
-                df_forecast_dim["fecha_fin_venta"], errors="coerce"
-            )
-            df_forecast_dim = df_forecast_dim[
-                df_forecast_dim["fecha_fin_venta"].isna()
-                | (df_forecast_dim["fecha_fin_venta"] >= fecha_pred_ts)
-            ]
+        # ── Boosts empíricos ──
+        # Víspera de festivo: la gente compra extra el día antes
+        BOOST_VISPERA = 1.25 if es_vispera_flag else 1.0
 
-        if categorias_sel:
-            df_forecast_dim = df_forecast_dim[df_forecast_dim["categoria_nombre"].isin(categorias_sel)]
-        if productos_sel:
-            df_forecast_dim = df_forecast_dim[df_forecast_dim["producto_nombre"].isin(productos_sel)]
+        # ── Leer stock actual de HOY (control_diario) para descontar ──
+        try:
+            df_hoy = cargar_control_diario(fecha_pred, LOCAL_ID)
+            stock_hoy: Dict[int, float] = {}
+            if not df_hoy.empty:
+                stock_hoy = {
+                    int(r["producto_id"]): safe_float(r.get("stock_inicial", 0))
+                    for _, r in df_hoy.iterrows()
+                }
+        except Exception:
+            stock_hoy = {}
 
-        if df_forecast_dim.empty:
-            st.warning("No hay productos válidos para forecast con esos filtros.")
-            st.stop()
-
-        # ── Load ALL historical data for best prediction ──
-        # Find earliest available data (up to 3 years back)
-        fecha_ini_hist = fecha_pred - datetime.timedelta(days=3 * 365)
-
-        with st.spinner("Analizando todo el histórico de ventas..."):
-            df_sales = cargar_ventas_rango(
-                fecha_ini_hist,
-                fecha_pred - datetime.timedelta(days=1),
-                LOCAL_ID,
-            )
-
-        if df_sales.empty:
-            st.warning("No hay histórico suficiente.")
-            st.stop()
-
-        # Merge with dim to get producto_nombre, categoria, uds_equivalentes
-        _merge_cols = ["producto_id", "producto_nombre", "categoria_nombre"]
-        if "uds_equivalentes_empanadas" in df_forecast_dim.columns:
-            _merge_cols.append("uds_equivalentes_empanadas")
-        _dim_merge = df_forecast_dim[_merge_cols].drop_duplicates(subset=["producto_id"])
-
-        df_sales = df_sales.merge(_dim_merge, on="producto_id", how="inner")
-
-        if df_sales.empty:
-            st.warning("No hay ventas históricas para esos productos.")
-            st.stop()
-
-        # -------------------------------------------------
-        # Motor de forecast v2 - con detección de outliers,
-        # peso por recencia y ajuste de tendencia
-        # -------------------------------------------------
-        def _forecast_producto(sub_dow_df, pct, es_festivo, fecha_obj):
-            """Calcula forecast para un producto usando datos del mismo día de semana."""
-            if sub_dow_df.empty:
-                return 0.0
-            sub = sub_dow_df.sort_values("fecha")
-            vals = sub["uds_v"].values.astype(float)
-            fechas = pd.to_datetime(sub["fecha"]).values
-
-            # 1) Detección de outliers (IQR)
-            q1, q3 = np.percentile(vals, [25, 75])
-            iqr = q3 - q1
-            if iqr < 1:
-                iqr = max(q3 * 0.3, 1)
-            lower = max(0, q1 - 1.5 * iqr)
-            upper = q3 + 1.5 * iqr
-            is_normal = (vals >= lower) & (vals <= upper)
-
-            # 2) Modo festivo: usar días atípicos altos
-            if es_festivo:
-                high = vals[vals > upper]
-                if len(high) >= 2:
-                    return float(np.percentile(high, min(pct, 75)))
-                nv = vals[is_normal] if is_normal.sum() >= 3 else vals
-                return float(np.percentile(nv, pct)) * 1.25
-
-            # 3) Días normales (sin outliers)
-            nv = vals[is_normal]
-            nf = fechas[is_normal]
-            if len(nv) < 3:
-                nv = vals
-                nf = fechas
-
-            # 4) Peso por recencia: recientes pesan 3x, medios 2x, viejos 1x
-            fecha_np = np.datetime64(fecha_obj)
-            dias_atras = (fecha_np - nf).astype("timedelta64[D]").astype(float)
-            semanas = dias_atras / 7.0
-            pesos = np.where(semanas <= 8, 3, np.where(semanas <= 16, 2, 1)).astype(int)
-            repetidos = np.repeat(nv, pesos)
-            if len(repetidos) == 0:
-                return 0.0
-            base = float(np.percentile(repetidos, pct))
-
-            # 5) Ajuste por tendencia (últimas 4 semanas vs promedio general)
-            rec = nv[semanas <= 4]
-            if len(rec) >= 2 and nv.mean() > 0:
-                ratio = rec.mean() / nv.mean()
-                factor = max(0.80, min(1.20, ratio))
-                base *= factor
-
-            return base
-
-        df_daily = df_sales.groupby(
-            ["fecha", "producto_id", "producto_nombre"], as_index=False
-        )["uds_v"].sum()
-        df_daily["fecha"] = pd.to_datetime(df_daily["fecha"])
-
-        # Víspera de festivo → usar datos de viernes (dow=4)
-        objetivo_dow = fecha_pred.weekday()
-
-        # ── Forecast engine with multi-variable weighting ──
+        # ── Forecast por producto ──
         resultados: List[Dict[str, Any]] = []
-
         for _, p in df_forecast_dim.iterrows():
-            pid = p["producto_id"]
+            pid = int(p["producto_id"])
             nombre = p["producto_nombre"]
             eq_emp = float(p.get("uds_equivalentes_empanadas", 0) or 0)
 
@@ -2402,21 +2303,33 @@ elif st.session_state.pantalla == "Forecast":
                 continue
 
             sub["dow"] = sub["fecha"].dt.weekday
-            sub_dow = sub[sub["dow"] == objetivo_dow][["fecha", "uds_v"]]
-
+            sub_dow = sub[sub["dow"] == fecha_pred.weekday()][["fecha", "uds_v"]]
             if sub_dow.empty:
                 sub_dow = sub[["fecha", "uds_v"]]
 
-            base = _forecast_producto(sub_dow, pct, es_festivo, fecha_pred)
+            base = _forecast_producto(sub_dow, pct, es_festivo_flag, fecha_pred)
 
-            total = int(np.ceil(base))
-            if total > 0:
+            # Aplicar boost víspera (si aplica)
+            base *= BOOST_VISPERA
+
+            # Aplicar buffer del 30%
+            con_buffer = base * (1 + BUFFER_PCT)
+
+            # Descontar stock actual del control diario de hoy
+            stock_actual = stock_hoy.get(pid, 0)
+            hornear_neto = max(0, con_buffer - stock_actual)
+
+            total = int(np.ceil(hornear_neto))
+
+            if total > 0 or base > 0:
                 row_data = {
                     "Producto": nombre,
-                    "Uds estimadas": total,
+                    "Prev. ventas": int(round(base)),
+                    "Stock actual": int(stock_actual),
+                    "A hornear": total,
                     "Tanda 1 (70%)": int(np.ceil(total * 0.7)),
                     "Tanda 2 (30%)": int(np.floor(total * 0.3)),
-                    "Días históricos": len(hist_dow),
+                    "Días histórico": len(sub_dow),
                 }
                 if eq_emp > 0:
                     row_data["Eq. empanadas"] = int(np.ceil(total * eq_emp))
@@ -2426,19 +2339,30 @@ elif st.session_state.pantalla == "Forecast":
             st.warning("No pude generar forecast.")
             st.stop()
 
-        df_res = pd.DataFrame(resultados).sort_values("Uds estimadas", ascending=False)
+        df_res = pd.DataFrame(resultados).sort_values("A hornear", ascending=False)
 
-        # ── Summary metrics ──
-        total_uds = df_res["Uds estimadas"].sum()
-        total_emp = df_res["Eq. empanadas"].sum() if "Eq. empanadas" in df_res.columns else 0
+        # ── Aviso de contexto ──
+        contexto_msgs = []
+        if es_festivo_flag:
+            contexto_msgs.append("🎉 Hoy es FESTIVO")
+        if es_vispera_flag:
+            contexto_msgs.append(f"🚩 Hoy es VÍSPERA de festivo (×{BOOST_VISPERA})")
+        if contexto_msgs:
+            st.info(" | ".join(contexto_msgs))
 
-        _m1, _m2, _m3, _m4 = st.columns(4)
-        _m1.metric("Total unidades", f"{total_uds}")
-        if total_emp > 0:
-            _m2.metric("Total eq. empanadas", f"{total_emp}")
-        _m3.metric("Productos", f"{len(df_res)}")
-        _m4.metric("Estrategia", estrategia)
+        # ── Métricas resumen ──
+        total_uds = int(df_res["A hornear"].sum());
+        total_emp = int(df_res["Eq. empanadas"].sum()) if "Eq. empanadas" in df_res.columns else 0;
+        hornadas = int(np.ceil(total_uds / UDS_POR_HORNADA)) if total_uds > 0 else 0;
+        capacidad = hornadas * UDS_POR_HORNADA;
+        huecos = max(0, capacidad - total_uds);
 
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total a hornear", f"{total_uds} uds")
+        m2.metric("Hornadas de 60", f"{hornadas}")
+        m3.metric("Huecos libres", f"{huecos} uds")
+        m4.metric("Productos", f"{len(df_res)}")
+        m5.metric("Estrategia", estrategia)
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
         # ── WhatsApp text ──
