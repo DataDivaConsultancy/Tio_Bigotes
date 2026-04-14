@@ -2499,7 +2499,7 @@ elif st.session_state.pantalla == "Forecast":
         txt = f"*PLAN DE HORNEADO - {fecha_pred.strftime('%d/%m/%Y')}*\n"
         _dow_names = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
         txt += f"{_dow_names.get(fecha_pred.weekday(), '')} | {estrategia}"
-        if es_festivo:
+        if es_festivo_flag:
             txt += " | FESTIVO"
         txt += "\n" + "-" * 25 + "\n"
 
