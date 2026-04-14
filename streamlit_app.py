@@ -2264,6 +2264,61 @@ elif st.session_state.pantalla == "Forecast":
 
     if st.button("🚀 Calcular forecast"):
         # ── Detectar contexto de festivo y víspera ──
+        df_forecast_dim = DF_DIM.copy()
+        df_forecast_dim = df_forecast_dim[
+            (df_forecast_dim["activo"] == True)
+            & (df_forecast_dim["visible_en_forecast"] == True)
+            & (df_forecast_dim["afecta_forecast"] == True)
+        ]
+
+        fecha_pred_ts = pd.to_datetime(fecha_pred)
+
+        if "fecha_inicio_venta" in df_forecast_dim.columns:
+            df_forecast_dim["fecha_inicio_venta"] = pd.to_datetime(
+                df_forecast_dim["fecha_inicio_venta"], errors="coerce"
+            )
+            df_forecast_dim = df_forecast_dim[
+                df_forecast_dim["fecha_inicio_venta"].isna()
+                | (df_forecast_dim["fecha_inicio_venta"] <= fecha_pred_ts)
+            ]
+
+        if "fecha_fin_venta" in df_forecast_dim.columns:
+            df_forecast_dim["fecha_fin_venta"] = pd.to_datetime(
+                df_forecast_dim["fecha_fin_venta"], errors="coerce"
+            )
+            df_forecast_dim = df_forecast_dim[
+                df_forecast_dim["fecha_fin_venta"].isna()
+                | (df_forecast_dim["fecha_fin_venta"] >= fecha_pred_ts)
+            ]
+
+        if categorias_sel:
+            df_forecast_dim = df_forecast_dim[df_forecast_dim["categoria_nombre"].isin(categorias_sel)]
+        if productos_sel:
+            df_forecast_dim = df_forecast_dim[df_forecast_dim["producto_nombre"].isin(productos_sel)]
+
+        if df_forecast_dim.empty:
+            st.warning("No hay productos válidos para forecast con esos filtros.")
+            st.stop()
+
+        # ── Load ALL historical data for best prediction ──
+        # Find earliest available data (up to 3 years back)
+        fecha_ini_hist = fecha_pred - datetime.timedelta(days=3 * 365)
+
+        with st.spinner("Analizando todo el histórico de ventas..."):
+            df_sales = cargar_ventas_rango(
+                fecha_ini_hist,
+                fecha_pred - datetime.timedelta(days=1),
+                LOCAL_ID,
+            )
+
+        if df_sales.empty:
+            st.warning("No hay histórico suficiente.")
+            st.stop()
+
+        # Merge with dim to get producto_nombre, categoria, uds_equivalentes
+        _merge_cols = ["producto_id", "producto_nombre", "categoria_nombre"]
+        if "uds_equivalentes_empanadas" in df_forecast_dim.columns:
+            _merge_cols.append("uds_equivalentes_empanadas")
         es_festivo_flag = _es_festivo(fecha_pred)
         es_vispera_flag = _es_vispera_festivo(fecha_pred)
 
