@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+import datetime
+import csv
+import hashlib
+import io
+import re
+import secrets
 import string
 import time
 import unicodedata
@@ -10,6 +17,15 @@ import plotly.express as px
 import requests
 import streamlit as st
 from st_supabase_connection import SupabaseConnection
+
+st.set_page_config(
+    page_title="Tío Bigotes Pro",
+    page_icon="TB",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+APP_VERSION = "Compras-v2 · 2026-04-16"
 
 
 # =========================================================
