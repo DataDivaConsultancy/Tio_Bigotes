@@ -607,14 +607,15 @@ if st.session_state.pantalla == "Home":
     _user = get_user()
     _compras_ready = compras_v2_ready()
     st.markdown(
+   st.markdown(
     f"""<div class="tb-header">
         <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
                 <h1>&#x1F95F; Tío Bigotes</h1>
-                <div class="tb-subtitle">📍 Diputació 159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
+                <div class="tb-subtitle">DIP159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
             </div>
             <div class="tb-user">
-                👤 {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
+                User: {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
             </div>
         </div>
     </div>""",
