@@ -615,7 +615,7 @@ if st.session_state.pantalla == "Home":
                 <div class="tb-subtitle">DIP159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
             </div>
             <div class="tb-user">
-                User: {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
+                User: {_user['nombre']} &nbsp;|&nbsp; {_user['rol']}
             </div>
         </div>
     </div>""",
