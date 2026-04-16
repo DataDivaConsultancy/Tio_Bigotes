@@ -567,13 +567,12 @@ def cerrar_sesion() -> None:
 def pantalla_login() -> None:
     _lc, _login_col, _rc = st.columns([1, 1.5, 1])
     with _login_col:
-        st.markdown(
-            '<div class="login-logo">🥟</div>'
-            '<div class="login-title">Tío Bigotes</div>'
-            '<div class="login-subtitle">Auténticas Empanadas Argentinas</div>',
-            unsafe_allow_html=True,
-        )
-
+        sst.markdown(
+    '<div class="login-logo">&#x1F95F;</div>'
+    '<div class="login-title">Tío Bigotes</div>'
+    '<div class="login-subtitle">Auténticas Empanadas Argentinas</div>',
+    unsafe_allow_html=True,
+)
         with st.form("login_form"):
             email = st.text_input("Email")
             password = st.text_input("Contraseña", type="password")
@@ -608,19 +607,19 @@ if st.session_state.pantalla == "Home":
     _user = get_user()
     _compras_ready = compras_v2_ready()
     st.markdown(
-        f"""<div class="tb-header">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div>
-                    <h1>🥟 Tío Bigotes</h1>
-                    <div class="tb-subtitle">📍 Diputació 159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
-                </div>
-                <div class="tb-user">
-                    👤 {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
-                </div>
+    f"""<div class="tb-header">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <h1>&#x1F95F; Tío Bigotes</h1>
+                <div class="tb-subtitle">📍 Diputació 159 &nbsp;|&nbsp; {datetime.date.today().strftime('%d/%m/%Y')}</div>
             </div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+            <div class="tb-user">
+                👤 {_user['nombre']} &nbsp;•&nbsp; {_user['rol']}
+            </div>
+        </div>
+    </div>""",
+    unsafe_allow_html=True,
+)
     _btn_l, _btn_r, _ = st.columns([1, 1, 4])
     st.caption(f"Versión app: {APP_VERSION}")
     if not _compras_ready:
