@@ -596,7 +596,6 @@ DF_DIM = cargar_dim_productos()
 if st.session_state.pantalla == "Home":
     _user = get_user()
     _compras_ready = compras_v2_ready()
-    st.markdown(
    st.markdown(
     f"""<div class="tb-header">
         <div style="display:flex; justify-content:space-between; align-items:center;">
