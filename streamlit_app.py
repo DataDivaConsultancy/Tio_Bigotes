@@ -66,6 +66,9 @@ st.markdown(
 div[data-testid="stVerticalBlock"] > div.home-nav div.stButton > button {
     height: 88px;
     width: 100%;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # =========================================================
 # HELPERS
