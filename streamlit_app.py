@@ -506,6 +506,10 @@ def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str)
         f"Email: {email}\n"
         f"Contraseña temporal: {password}\n\n"
         f"Deberás cambiarla en tu primer inicio de sesión."
+    )
+    encoded = urllib.parse.quote(msg)
+    return f"https://wa.me/{telefono}?text={encoded}"
+
 def registrar_actividad(accion: str, seccion: str, detalle: Optional[Dict[str, Any]] = None) -> None:
     """Registra una acción en el log de auditoría (fire-and-forget)."""
     user = st.session_state.get("auth_user")
