@@ -66,7 +66,6 @@ st.markdown(
 div[data-testid="stVerticalBlock"] > div.home-nav div.stButton > button {
     height: 88px;
     width: 100%;
-@@ -224,50 +226,58 @@ except Exception as e:
 
 # =========================================================
 # HELPERS
@@ -125,7 +124,6 @@ def safe_int(v: Any, default: int = 0) -> int:
 
 
 
-@@ -367,50 +377,311 @@ def detectar_csv(file_bytes: bytes) -> Tuple[str, str, str]:
         dialect = csv.Sniffer().sniff(muestra, delimiters=";,\t|")
         sep = dialect.delimiter
     except Exception:
@@ -437,7 +435,6 @@ def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
             return resp[key]
         return resp
     return resp
-@@ -959,61 +1230,71 @@ def guardar_control_diario(payloads: List[Dict[str, Any]]) -> None:
         return
 
     for p in payloads:
@@ -463,7 +460,6 @@ def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
 
 TODAS_LAS_PANTALLAS = [
     "Productos",
-    "Compras",
     "Proveedores",
     "ProductosCompra",
     "Locales",
@@ -479,7 +475,6 @@ TODAS_LAS_PANTALLAS = [
 
 PANTALLA_LABELS = {
     "Productos": "Productos",
-    "Compras": "Compras",
     "Proveedores": "Proveedores",
     "ProductosCompra": "Productos Compra",
     "Locales": "Locales",
@@ -509,7 +504,6 @@ def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str)
         f"Email: {email}\n"
         f"Contraseña temporal: {password}\n\n"
         f"Deberás cambiarla en tu primer inicio de sesión."
-@@ -1027,60 +1308,68 @@ def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str)
 def registrar_actividad(accion: str, seccion: str, detalle: Optional[Dict[str, Any]] = None) -> None:
     """Registra una acción en el log de auditoría (fire-and-forget)."""
     user = st.session_state.get("auth_user")
@@ -550,11 +544,6 @@ def user_has_access(pantalla: str) -> bool:
         return True
     permisos = user.get("permisos") or []
 
-    # Compatibilidad: usuarios creados antes del módulo de Compras
-    # pueden no tener el permiso "Compras" pero sí "Productos".
-    if pantalla == "Compras":
-        return ("Compras" in permisos) or ("Productos" in permisos)
-
     return pantalla in permisos
 
 
@@ -579,7 +568,6 @@ def pantalla_login() -> None:
             submit = st.form_submit_button("Entrar", use_container_width=True)
 
         st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
-@@ -1264,104 +1553,126 @@ if get_user().get("must_change_password") and st.session_state.pantalla != "Camb
     st.session_state.pantalla = "CambiarPassword"
 
 if st.session_state.pantalla == "CambiarPassword":
@@ -625,7 +613,7 @@ if st.session_state.pantalla == "Home":
     st.caption(f"Versión app: {APP_VERSION}")
     if not _compras_ready:
         st.warning("Módulo Compras v2 no inicializado en esta base. Ejecuta `sql_migration_compras_productos.sql`.")
-    _btn_l, _btn_r, _btn_compras, _ = st.columns([1, 1, 1, 3])
+    _btn_l, _btn_r, _ = st.columns([1, 1, 4])
     with _btn_l:
         if st.button("🔑 Cambiar contraseña", use_container_width=True):
             st.session_state.pantalla = "CambiarPassword"
@@ -634,10 +622,6 @@ if st.session_state.pantalla == "Home":
         if st.button("🔒 Cerrar sesión", use_container_width=True):
             cerrar_sesion()
             st.rerun()
-    with _btn_compras:
-        if st.button("🛒 Ir a Compras", use_container_width=True):
-            ir_a("Compras")
-
     _btn_config = {
         "Productos":   ("📦 PRODUCTOS",      "c1"),
         "Proveedores": ("🏭 PROVEEDORES",   "c1"),
@@ -658,13 +642,6 @@ if st.session_state.pantalla == "Home":
 
     for pantalla_key, (label, col_key) in _btn_config.items():
         if user_has_access(pantalla_key):
-        can_see = user_has_access(pantalla_key)
-        # "Compras" se muestra siempre a usuarios autenticados para evitar
-        # bloqueos por permisos legacy no sincronizados.
-        if pantalla_key in ("Compras", "Proveedores", "ProductosCompra", "Locales", "Stock"):
-            can_see = True
-
-        if can_see:
             with _cols[col_key]:
                 if st.button(label):
                     ir_a(pantalla_key)
@@ -679,12 +656,6 @@ elif st.session_state.pantalla == "Productos":
         st.error("No tienes acceso a esta sección.")
         st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
-    _p_back, _p_buy = st.columns([1, 1])
-    with _p_back:
-        st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
-    with _p_buy:
-        if st.button("🛒 IR A COMPRAS"):
-            ir_a("Compras")
     st.header("📦 Catálogo de Productos")
 
     res_dim = conn.table("vw_productos_dim").select("*").execute()
@@ -710,7 +681,6 @@ elif st.session_state.pantalla == "Productos":
     if solo_activos:
         df_view = df_view[df_view["activo"] == True]
 
-@@ -1491,50 +1802,278 @@ elif st.session_state.pantalla == "Productos":
                                 "p_subtipo": str(cat_row["codigo"]).lower(),
                                 "p_activo": activo_nuevo,
                                 "p_es_vendible": True,
@@ -736,233 +706,740 @@ elif st.session_state.pantalla == "Productos":
                     st.rerun()
 
 
+
+def _supabase_get(table, params="", select="*"):
+    """Helper GET genérico para tablas Supabase REST API."""
+    try:
+        base_url = st.secrets["connections"]["supabase"]["url"].rstrip("/")
+        api_key = st.secrets["connections"]["supabase"]["key"]
+        headers = {"apikey": api_key, "Authorization": f"Bearer {api_key}"}
+        url = f"{base_url}/rest/v1/{table}?select={select}"
+        if params:
+            url += f"&{params}"
+        resp = requests.get(url, headers=headers, timeout=15)
+        return resp.json() if resp.ok else []
+    except Exception:
+        return []
+
+
 # =========================================================
-# COMPRAS
+# MÓDULO DE COMPRAS
 # =========================================================
 
-elif st.session_state.pantalla in ("Compras", "Proveedores", "ProductosCompra", "Locales", "Stock"):
-    pantalla_compra = st.session_state.pantalla
+elif st.session_state.pantalla == "Proveedores":
+    if not user_has_access("Proveedores"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
     st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
-    st.header(f"🛒 Módulo de Compras · {pantalla_compra}")
+    st.header("🏭 Proveedores")
 
-    df_proveedores = cargar_proveedores_compra()
-    df_productos_compra = cargar_productos_compra()
-    df_locales_compra = cargar_locales_compra()
+    if "prov_modo" not in st.session_state:
+        st.session_state.prov_modo = "lista"
+    if "prov_edit_id" not in st.session_state:
+        st.session_state.prov_edit_id = None
 
-    if pantalla_compra in ("Compras", "Proveedores"):
-        st.subheader("🏭 Proveedores")
-        st.dataframe(df_proveedores, use_container_width=True, hide_index=True)
-        with st.form("form_proveedor_compra"):
-            c1, c2 = st.columns(2)
-            payload = {
-                "nombre_comercial": c1.text_input("Nombre Comercial *"),
-                "razon_social": c2.text_input("Razón Social"),
-                "cif": c1.text_input("CIF"),
-                "domicilio": c2.text_input("Domicilio"),
-                "persona_contacto": c1.text_input("Persona Contacto"),
-                "telefono_contacto": c2.text_input("Teléfono Contacto"),
-                "mail_contacto": c1.text_input("Mail Contacto"),
-                "forma_pago": c2.selectbox("Forma de Pago", ["", "SEPA", "Transferencia", "T. Credito", "Efectivo"]),
-                "plazo_pago": c1.text_input("Plazo de Pago", value="30 días"),
-                "notas": c2.text_input("Notas"),
-                "activo": True,
-            }
-            if st.form_submit_button("Guardar proveedor"):
-                upsert_proveedor_compra(payload)
-                st.success("Proveedor guardado")
-                st.rerun()
+    FORMAS_PAGO = ["", "SEPA", "Transferencia", "T. Credito", "Efectivo"]
 
-    if pantalla_compra in ("Compras", "Locales"):
-        st.subheader("🏪 Locales")
-        st.dataframe(df_locales_compra, use_container_width=True, hide_index=True)
-        with st.form("form_local_compra"):
-            c1, c2 = st.columns(2)
-            payload_local = {
-                "nombre": c1.text_input("Nombre local *"),
-                "direccion": c2.text_input("Dirección"),
-                "telefono": c1.text_input("Teléfono"),
-                "transporte": c2.text_input("Transporte"),
-                "activo": True,
-            }
-            if st.form_submit_button("Guardar local"):
-                upsert_local_compra(payload_local)
-                st.success("Local guardado")
-                st.rerun()
-
-    if pantalla_compra in ("Compras", "ProductosCompra"):
-        st.subheader("📦 Productos Compra")
-        if not df_productos_compra.empty:
-            st.dataframe(df_productos_compra, use_container_width=True, hide_index=True)
-
-        proveedores_dict = {int(r["id"]): str(r.get("nombre_comercial") or "") for _, r in df_proveedores.iterrows()} if not df_proveedores.empty else {}
-        proveedores_meta = {int(r["id"]): r.to_dict() for _, r in df_proveedores.iterrows()} if not df_proveedores.empty else {}
-        with st.form("form_producto_compra"):
-            c1, c2 = st.columns(2)
-            proveedor_sel = c1.selectbox("Proveedor", options=[None] + sorted(proveedores_dict.keys()), format_func=lambda x: "—" if x is None else proveedores_dict[x])
-            forma_pago_default = ""
-            plazo_pago_default = ""
-            if proveedor_sel and proveedor_sel in proveedores_meta:
-                forma_pago_default = str(proveedores_meta[proveedor_sel].get("forma_pago") or "")
-                plazo_pago_default = str(proveedores_meta[proveedor_sel].get("plazo_pago") or "")
-            payload_prod = {
-                "cod_proveedor": c1.text_input("Cód. proveedor"),
-                "cod_interno": c2.text_input("Cód. interno *"),
-                "nombre": st.text_input("Nombre *"),
-                "medidas": c1.text_input("Medidas"),
-                "color": c2.text_input("Color"),
-                "unidad_medida": c1.text_input("Unidad medida"),
-                "unidad_minima_compra": c2.number_input("Unidad mínima compra", min_value=0.0, step=0.5, value=0.0),
-                "dia_pedido": c1.text_input("Día pedido"),
-                "dia_entrega": c2.text_input("Día entrega"),
-                "proveedor_id": proveedor_sel,
-                "precio": c2.number_input("Precio", min_value=0.0, step=0.1, value=0.0),
-                "tipo_iva": c1.selectbox("Tipo IVA", ["General 21%", "Reducido 10%", "Superreducido 4%", "Exento 0%"]),
-                "forma_pago": c2.selectbox(
-                    "Forma pago (heredada editable)",
-                    ["", "SEPA", "Transferencia", "T. Credito", "Efectivo"],
-                    index=(["", "SEPA", "Transferencia", "T. Credito", "Efectivo"].index(forma_pago_default) if forma_pago_default in ["", "SEPA", "Transferencia", "T. Credito", "Efectivo"] else 0),
-                ),
-                "plazo_pago": c1.text_input("Plazo pago (heredado editable)", value=plazo_pago_default),
-                "stock_minimo": c2.number_input("Stock mínimo", min_value=0.0, step=1.0, value=0.0),
-                "activo": True,
-            }
-            if st.form_submit_button("Guardar producto"):
-                upsert_producto_compra(payload_prod)
-                st.success("Producto guardado")
-                st.rerun()
-
-        st.caption("Importación CSV de Productos Compra")
-        archivo_compra = st.file_uploader("Sube CSV", type=["csv"], key="csv_prod_compra_v2")
-        if archivo_compra is not None and st.button("Importar CSV Productos Compra"):
-            file_bytes = archivo_compra.getvalue()
-            df_all, _, sep_detectado = leer_csv_preview(file_bytes, nrows=50000)
-            df_to_import = preparar_csv_productos_compra(df_all)
-            proveedores_map = {}
-            if not df_proveedores.empty:
-                for _, p in df_proveedores.iterrows():
-                    n = str(p.get("nombre_comercial") or "").strip().lower()
-                    if n:
-                        proveedores_map[n] = p.to_dict()
-            for _, row in df_to_import.iterrows():
-                row_d = row.to_dict()
-                prov_n = str(row_d.get("proveedor") or "").strip().lower()
-                if prov_n in proveedores_map:
-                    row_d["proveedor_id"] = int(proveedores_map[prov_n]["id"])
-                    row_d["forma_pago"] = proveedores_map[prov_n].get("forma_pago")
-                    row_d["plazo_pago"] = proveedores_map[prov_n].get("plazo_pago")
-                row_d["activo"] = True
-                upsert_producto_compra(row_d)
-            st.success("Importación completada")
+    col_a, _ = st.columns([1, 5])
+    with col_a:
+        if st.button("➕ Nuevo proveedor", use_container_width=True):
+            st.session_state.prov_modo = "nuevo"
+            st.session_state.prov_edit_id = None
             st.rerun()
 
-    if pantalla_compra in ("Compras", "Stock"):
-        st.subheader("📊 Stock")
-        df_stock = cargar_stock_compra()
-        if not df_stock.empty and not df_productos_compra.empty:
-            merge_cols = ["id", "dia_pedido", "dia_entrega", "stock_minimo"]
-            df_meta = df_productos_compra[[c for c in merge_cols if c in df_productos_compra.columns]].copy()
-            df_meta = df_meta.rename(columns={"id": "producto_compra_id", "stock_minimo": "stock_minimo_cfg"})
-            df_stock = df_stock.merge(df_meta, on="producto_compra_id", how="left")
-            df_stock["lead_time_dias"] = df_stock.apply(
-                lambda r: calcular_lead_time_dias(r.get("dia_pedido"), r.get("dia_entrega")),
-                axis=1,
-            )
-            df_stock["venta_media_dia_est"] = df_stock["stock_minimo_cfg"].fillna(0).apply(
-                lambda x: max(float(x) / 7.0, 0.1)
-            )
-            df_stock["consumo_lead_time"] = df_stock["venta_media_dia_est"] * df_stock["lead_time_dias"]
-            df_stock["stock_seguridad"] = df_stock.apply(
-                lambda r: max(float(r.get("stock_minimo_cfg") or 0), float(r.get("venta_media_dia_est") or 0)),
-                axis=1,
-            )
-            df_stock["punto_reorden"] = df_stock["consumo_lead_time"] + df_stock["stock_seguridad"]
+    if st.session_state.prov_modo in ("nuevo", "editar"):
+        es_edicion = st.session_state.prov_modo == "editar"
+        st.subheader("✏️ Editar proveedor" if es_edicion else "➕ Nuevo proveedor")
+        datos = {}
+        if es_edicion and st.session_state.prov_edit_id:
+            rows = _supabase_get("proveedores_v2", f"id=eq.{st.session_state.prov_edit_id}")
+            if rows:
+                datos = rows[0]
 
-            def _estado(r: pd.Series) -> str:
-                s = float(r.get("stock_actual") or 0)
-                if s <= float(r.get("consumo_lead_time") or 0) * 0.5:
-                    return "🔴 CRÍTICO"
-                if s <= float(r.get("punto_reorden") or 0):
-                    return "⚠ PEDIR"
-                return "✅ OK"
+        with st.form("form_proveedor", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                nombre_comercial = st.text_input("Nombre comercial *", value=datos.get("nombre_comercial", ""))
+                cif = st.text_input("CIF", value=datos.get("cif", ""))
+                persona_contacto = st.text_input("Persona de contacto", value=datos.get("persona_contacto", ""))
+                mail_contacto = st.text_input("Email contacto", value=datos.get("mail_contacto", ""))
+                forma_pago = st.selectbox("Forma de pago", FORMAS_PAGO,
+                    index=FORMAS_PAGO.index(datos.get("forma_pago", "")) if datos.get("forma_pago", "") in FORMAS_PAGO else 0)
+            with c2:
+                razon_social = st.text_input("Razón social", value=datos.get("razon_social", ""))
+                domicilio = st.text_input("Domicilio", value=datos.get("domicilio", ""))
+                telefono_contacto = st.text_input("Teléfono contacto", value=datos.get("telefono_contacto", ""))
+                mail_pedidos = st.text_input("📧 Email para pedidos", value=datos.get("mail_pedidos", ""),
+                    help="Email donde se envían los pedidos de compra")
+                plazo_pago = st.text_input("Plazo de pago", value=datos.get("plazo_pago", ""),
+                    placeholder="Ej: 30 días, contado")
+            notas = st.text_area("Notas", value=datos.get("notas", ""), height=80)
+            col_s, col_c = st.columns([1, 3])
+            with col_s:
+                submitted = st.form_submit_button("💾 Guardar", use_container_width=True, type="primary")
+            with col_c:
+                cancelar = st.form_submit_button("❌ Cancelar", use_container_width=True)
 
-            df_stock["estado"] = df_stock.apply(_estado, axis=1)
+        if cancelar:
+            st.session_state.prov_modo = "lista"
+            st.session_state.prov_edit_id = None
+            st.rerun()
+        if submitted:
+            if not nombre_comercial.strip():
+                st.error("El nombre comercial es obligatorio.")
+            else:
+                params = {
+                    "p_nombre_comercial": nombre_comercial.strip(),
+                    "p_razon_social": razon_social.strip() or None,
+                    "p_cif": cif.strip() or None,
+                    "p_domicilio": domicilio.strip() or None,
+                    "p_persona_contacto": persona_contacto.strip() or None,
+                    "p_telefono_contacto": telefono_contacto.strip() or None,
+                    "p_mail_contacto": mail_contacto.strip() or None,
+                    "p_mail_pedidos": mail_pedidos.strip() or None,
+                    "p_forma_pago": forma_pago if forma_pago else None,
+                    "p_plazo_pago": plazo_pago.strip() or None,
+                    "p_notas": notas.strip() or None,
+                }
+                try:
+                    if es_edicion:
+                        params["p_id"] = st.session_state.prov_edit_id
+                        res = rpc_call("rpc_actualizar_proveedor", params)
+                    else:
+                        res = rpc_call("rpc_crear_proveedor", params)
+                    resultado = res if isinstance(res, dict) else (res[0] if isinstance(res, list) and res else {})
+                    if resultado.get("ok"):
+                        st.success("Proveedor guardado correctamente.")
+                        registrar_actividad("crear_proveedor" if not es_edicion else "editar_proveedor", "Proveedores", {"nombre": nombre_comercial})
+                        st.session_state.prov_modo = "lista"
+                        st.session_state.prov_edit_id = None
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {resultado.get('error', 'Error desconocido')}")
+                except Exception as e:
+                    st.error(f"Error al guardar: {e}")
 
-        tab_prod, tab_trasp, tab_reg = st.tabs(["Por producto", "Traspasos", "Regularización"])
+    else:
+        # Listado de proveedores
+        proveedores = _supabase_get("proveedores_v2", "activo=eq.true&order=nombre_comercial.asc")
+        if not proveedores:
+            st.info("No hay proveedores registrados. Usa '➕ Nuevo proveedor' para añadir uno.")
+        else:
+            buscar = st.text_input("🔍 Buscar proveedor", placeholder="Nombre, CIF, contacto...")
+            if buscar:
+                buscar_l = buscar.lower()
+                proveedores = [p for p in proveedores if buscar_l in (p.get("nombre_comercial") or "").lower() or buscar_l in (p.get("cif") or "").lower() or buscar_l in (p.get("persona_contacto") or "").lower()]
+            st.caption(f"{len(proveedores)} proveedores activos")
+            df_prov = pd.DataFrame(proveedores)
+            cols_show = ["nombre_comercial", "cif", "persona_contacto", "telefono_contacto", "mail_pedidos", "forma_pago", "plazo_pago"]
+            cols_show = [c for c in cols_show if c in df_prov.columns]
+            st.dataframe(df_prov[cols_show].rename(columns={"nombre_comercial": "Nombre", "cif": "CIF", "persona_contacto": "Contacto", "telefono_contacto": "Teléfono", "mail_pedidos": "Email pedidos", "forma_pago": "Forma pago", "plazo_pago": "Plazo pago"}), use_container_width=True, hide_index=True)
 
-        with tab_prod:
-            st.dataframe(df_stock, use_container_width=True, hide_index=True)
-
-        if not df_productos_compra.empty and not df_locales_compra.empty:
-            productos_dict = {int(r["id"]): str(r.get("nombre") or "") for _, r in df_productos_compra.iterrows()}
-            locales_dict = {int(r["id"]): str(r.get("nombre") or "") for _, r in df_locales_compra.iterrows()}
-            with tab_trasp:
-                with st.form("form_traspaso_stock"):
-                    c1, c2, c3 = st.columns(3)
-                    producto_id = c1.selectbox("Producto", sorted(productos_dict.keys()), format_func=lambda x: productos_dict[x])
-                    local_origen = c2.selectbox("Local origen", sorted(locales_dict.keys()), format_func=lambda x: locales_dict[x])
-                    local_destino = c3.selectbox("Local destino", sorted(locales_dict.keys()), format_func=lambda x: locales_dict[x])
-                    cantidad = c1.number_input("Cantidad", min_value=0.0, step=0.5, value=0.0)
-                    fecha = c2.date_input("Fecha", value=datetime.date.today())
-                    motivo = c3.text_input("Motivo", value="Traspaso interno")
-                    if st.form_submit_button("Confirmar traspaso"):
-                        upsert_stock_compra(
-                            {
-                                "producto_id": producto_id,
-                                "local_id": local_origen,
-                                "tipo": "traspaso_salida",
-                                "cantidad": cantidad,
-                                "fecha": str(fecha),
-                                "motivo": f"{motivo} (salida)",
-                                "local_destino_id": local_destino,
-                            }
-                        )
-                        upsert_stock_compra(
-                            {
-                                "producto_id": producto_id,
-                                "local_id": local_destino,
-                                "tipo": "traspaso_entrada",
-                                "cantidad": cantidad,
-                                "fecha": str(fecha),
-                                "motivo": f"{motivo} (entrada)",
-                                "local_destino_id": local_destino,
-                            }
-                        )
-                        st.success("Traspaso registrado (salida + entrada).")
+            nombres_prov = {p["id"]: p["nombre_comercial"] for p in proveedores}
+            opciones_prov = [""] + [f"{v} (ID:{k})" for k, v in nombres_prov.items()]
+            sel_prov = st.selectbox("Seleccionar proveedor para editar", opciones_prov)
+            if sel_prov:
+                prov_id = int(sel_prov.split("ID:")[1].rstrip(")"))
+                c_e, c_d = st.columns(2)
+                with c_e:
+                    if st.button("✏️ Editar", use_container_width=True, key="btn_edit_prov"):
+                        st.session_state.prov_modo = "editar"
+                        st.session_state.prov_edit_id = prov_id
+                        st.rerun()
+                with c_d:
+                    if st.button("🗑️ Desactivar", use_container_width=True, key="btn_desact_prov"):
+                        rpc_call("rpc_actualizar_proveedor", {"p_id": prov_id, "p_activo": False})
+                        registrar_actividad("desactivar_proveedor", "Proveedores", {"id": prov_id})
+                        st.success("Proveedor desactivado.")
+                        time.sleep(0.5)
                         st.rerun()
 
-            with tab_reg:
-                with st.form("form_regularizacion_stock"):
-                    c1, c2, c3 = st.columns(3)
-                    producto_id = c1.selectbox("Producto ", sorted(productos_dict.keys()), key="reg_prod", format_func=lambda x: productos_dict[x])
-                    local_id = c2.selectbox("Local ", sorted(locales_dict.keys()), key="reg_local", format_func=lambda x: locales_dict[x])
-                    conteo_real = c3.number_input("Conteo real", min_value=0.0, step=0.5, value=0.0)
-                    motivo = c1.text_input("Motivo ajuste", value="Regularización inventario")
-                    fecha = c2.date_input("Fecha ajuste", value=datetime.date.today())
-                    if st.form_submit_button("Aplicar regularización"):
-                        stock_sistema = 0.0
-                        if not df_stock.empty:
-                            m = df_stock[
-                                (df_stock["producto_compra_id"] == producto_id) & (df_stock["local_id"] == local_id)
-                            ]
-                            if not m.empty:
-                                stock_sistema = float(m.iloc[0].get("stock_actual") or 0)
-                        diff = conteo_real - stock_sistema
-                        if abs(diff) < 1e-9:
-                            st.info("Sin diferencias, no se registró movimiento.")
+
+elif st.session_state.pantalla == "ProductosCompra":
+    if not user_has_access("ProductosCompra"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("🛒 Productos de Compra")
+
+    if "pc_modo" not in st.session_state:
+        st.session_state.pc_modo = "lista"
+    if "pc_edit_id" not in st.session_state:
+        st.session_state.pc_edit_id = None
+
+    TIPOS_IVA = ["", "General 21%", "Reducido 10%", "Superreducido 4%", "Exento 0%"]
+    FORMAS_PAGO_PC = ["", "SEPA", "Transferencia", "T. Credito", "Efectivo"]
+    UNIDADES = ["", "kg", "unidad", "litro", "caja", "bolsa", "paquete", "metro"]
+
+    tab_lista, tab_csv = st.tabs(["📋 Listado", "📥 Importar CSV"])
+
+    with tab_lista:
+        col_a, _ = st.columns([1, 5])
+        with col_a:
+            if st.button("➕ Nuevo producto", use_container_width=True, key="btn_nuevo_pc"):
+                st.session_state.pc_modo = "nuevo"
+                st.session_state.pc_edit_id = None
+                st.rerun()
+
+        proveedores_sel = _supabase_get("proveedores_v2", "activo=eq.true&order=nombre_comercial.asc", "id,nombre_comercial,forma_pago,plazo_pago")
+        prov_opciones = ["(Sin proveedor)"] + [p["nombre_comercial"] for p in proveedores_sel]
+        prov_ids = [None] + [p["id"] for p in proveedores_sel]
+        prov_map = {p["id"]: p["nombre_comercial"] for p in proveedores_sel}
+
+        if st.session_state.pc_modo in ("nuevo", "editar"):
+            es_ed = st.session_state.pc_modo == "editar"
+            st.subheader("✏️ Editar producto" if es_ed else "➕ Nuevo producto de compra")
+            datos_pc = {}
+            if es_ed and st.session_state.pc_edit_id:
+                rows_pc = _supabase_get("productos_compra_v2", f"id=eq.{st.session_state.pc_edit_id}")
+                if rows_pc:
+                    datos_pc = rows_pc[0]
+            prov_idx = 0
+            if datos_pc.get("proveedor_id"):
+                for ii, pid in enumerate(prov_ids):
+                    if pid == datos_pc["proveedor_id"]:
+                        prov_idx = ii
+                        break
+            with st.form("form_producto_compra", clear_on_submit=False):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    pc_nombre = st.text_input("Nombre *", value=datos_pc.get("nombre", ""))
+                    pc_cod_interno = st.text_input("Código interno", value=datos_pc.get("cod_interno", ""))
+                    pc_proveedor = st.selectbox("Proveedor", prov_opciones, index=prov_idx)
+                    pc_precio = st.number_input("Precio", value=float(datos_pc.get("precio") or 0), min_value=0.0, step=0.01, format="%.2f")
+                    pc_tipo_iva = st.selectbox("Tipo IVA", TIPOS_IVA, index=TIPOS_IVA.index(datos_pc.get("tipo_iva", "")) if datos_pc.get("tipo_iva", "") in TIPOS_IVA else 0)
+                with c2:
+                    pc_cod_prov = st.text_input("Código proveedor", value=datos_pc.get("cod_proveedor", ""))
+                    pc_medidas = st.text_input("Medidas", value=datos_pc.get("medidas", ""))
+                    pc_color = st.text_input("Color", value=datos_pc.get("color", ""))
+                    pc_unidad = st.selectbox("Unidad de medida", UNIDADES, index=UNIDADES.index(datos_pc.get("unidad_medida", "")) if datos_pc.get("unidad_medida", "") in UNIDADES else 0)
+                    pc_umin = st.number_input("Unidad mínima compra", value=float(datos_pc.get("unidad_minima_compra") or 0), min_value=0.0, step=1.0)
+                with c3:
+                    pc_dia_ped = st.text_input("Día(s) pedido", value=datos_pc.get("dia_pedido", ""), placeholder="Lunes,Miércoles")
+                    pc_dia_ent = st.text_input("Día(s) entrega", value=datos_pc.get("dia_entrega", ""), placeholder="Martes,Jueves")
+                    pc_fpago = st.selectbox("Forma pago (producto)", FORMAS_PAGO_PC, index=FORMAS_PAGO_PC.index(datos_pc.get("forma_pago", "")) if datos_pc.get("forma_pago", "") in FORMAS_PAGO_PC else 0, help="Vacío = hereda del proveedor")
+                    pc_plpago = st.text_input("Plazo pago (producto)", value=datos_pc.get("plazo_pago", ""), help="Vacío = hereda del proveedor")
+                    pc_stmin = st.number_input("Stock mínimo alerta", value=float(datos_pc.get("stock_minimo") or 0), min_value=0.0, step=1.0)
+                col_s2, col_c2 = st.columns([1, 3])
+                with col_s2:
+                    pc_sub = st.form_submit_button("💾 Guardar", use_container_width=True, type="primary")
+                with col_c2:
+                    pc_can = st.form_submit_button("❌ Cancelar", use_container_width=True)
+
+            if pc_can:
+                st.session_state.pc_modo = "lista"
+                st.session_state.pc_edit_id = None
+                st.rerun()
+            if pc_sub:
+                if not pc_nombre.strip():
+                    st.error("El nombre es obligatorio.")
+                else:
+                    prov_id_s = prov_ids[prov_opciones.index(pc_proveedor)] if pc_proveedor != "(Sin proveedor)" else None
+                    params_pc = {
+                        "p_nombre": pc_nombre.strip(), "p_proveedor_id": prov_id_s,
+                        "p_cod_proveedor": pc_cod_prov.strip() or None, "p_cod_interno": pc_cod_interno.strip() or None,
+                        "p_medidas": pc_medidas.strip() or None, "p_color": pc_color.strip() or None,
+                        "p_unidad_medida": pc_unidad or None, "p_unidad_minima_compra": pc_umin if pc_umin > 0 else None,
+                        "p_dia_pedido": pc_dia_ped.strip() or None, "p_dia_entrega": pc_dia_ent.strip() or None,
+                        "p_precio": pc_precio if pc_precio > 0 else None, "p_tipo_iva": pc_tipo_iva or None,
+                        "p_forma_pago": pc_fpago or None, "p_plazo_pago": pc_plpago.strip() or None,
+                        "p_stock_minimo": pc_stmin if pc_stmin > 0 else 0,
+                    }
+                    try:
+                        if es_ed:
+                            params_pc["p_id"] = st.session_state.pc_edit_id
+                            res_pc = rpc_call("rpc_actualizar_producto_compra", params_pc)
                         else:
-                            upsert_stock_compra(
-                                {
-                                    "producto_id": producto_id,
-                                    "local_id": local_id,
-                                    "tipo": "ajuste_positivo" if diff > 0 else "ajuste_negativo",
-                                    "cantidad": abs(diff),
-                                    "fecha": str(fecha),
-                                    "motivo": motivo,
-                                }
-                            )
-                            st.success(f"Regularización aplicada: {'+' if diff > 0 else ''}{diff:.2f}")
+                            res_pc = rpc_call("rpc_crear_producto_compra", params_pc)
+                        r_pc = res_pc if isinstance(res_pc, dict) else (res_pc[0] if isinstance(res_pc, list) and res_pc else {})
+                        if r_pc.get("ok"):
+                            st.success("Producto guardado." if not es_ed else "Producto actualizado.")
+                            registrar_actividad("crear_producto_compra" if not es_ed else "editar_producto_compra", "ProductosCompra", {"nombre": pc_nombre})
+                            st.session_state.pc_modo = "lista"
+                            st.session_state.pc_edit_id = None
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {r_pc.get('error', 'Error desconocido')}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        else:
+            # Listado productos compra
+            productos_pc = _supabase_get("productos_compra_v2", "activo=eq.true&order=nombre.asc",
+                "id,cod_interno,nombre,proveedor_id,precio,unidad_medida,dia_pedido,dia_entrega,forma_pago,plazo_pago,stock_minimo")
+            for p in productos_pc:
+                p["proveedor"] = prov_map.get(p.get("proveedor_id"), "—")
+            f1, f2 = st.columns(2)
+            with f1:
+                buscar_pc = st.text_input("🔍 Buscar producto", placeholder="Nombre, código...", key="buscar_pc")
+            with f2:
+                filtro_prov_pc = st.selectbox("Filtrar proveedor", ["Todos"] + list(prov_map.values()), key="filtro_prov_pc")
+            if buscar_pc:
+                bl = buscar_pc.lower()
+                productos_pc = [p for p in productos_pc if bl in (p.get("nombre") or "").lower() or bl in (p.get("cod_interno") or "").lower()]
+            if filtro_prov_pc != "Todos":
+                productos_pc = [p for p in productos_pc if p.get("proveedor") == filtro_prov_pc]
+            if not productos_pc:
+                st.info("No hay productos de compra.")
+            else:
+                st.caption(f"{len(productos_pc)} productos")
+                df_pc = pd.DataFrame(productos_pc)
+                cs = ["cod_interno", "nombre", "proveedor", "precio", "unidad_medida", "dia_pedido", "dia_entrega", "forma_pago", "plazo_pago"]
+                cs = [c for c in cs if c in df_pc.columns]
+                st.dataframe(df_pc[cs].rename(columns={"cod_interno": "Código", "nombre": "Nombre", "proveedor": "Proveedor", "precio": "Precio", "unidad_medida": "Unidad", "dia_pedido": "Día pedido", "dia_entrega": "Día entrega", "forma_pago": "Forma pago", "plazo_pago": "Plazo pago"}), use_container_width=True, hide_index=True)
+                nms_pc = {p["id"]: f"{p.get('cod_interno', '')} - {p['nombre']}" for p in productos_pc}
+                ops_pc = [""] + [f"{v} (ID:{k})" for k, v in nms_pc.items()]
+                sel_pc = st.selectbox("Seleccionar producto para editar", ops_pc, key="sel_edit_pc")
+                if sel_pc:
+                    pcid = int(sel_pc.split("ID:")[1].rstrip(")"))
+                    ce, cd = st.columns(2)
+                    with ce:
+                        if st.button("✏️ Editar", use_container_width=True, key="btn_edit_pc"):
+                            st.session_state.pc_modo = "editar"
+                            st.session_state.pc_edit_id = pcid
+                            st.rerun()
+                    with cd:
+                        if st.button("🗑️ Desactivar", use_container_width=True, key="btn_desact_pc"):
+                            rpc_call("rpc_actualizar_producto_compra", {"p_id": pcid, "p_activo": False})
+                            st.success("Producto desactivado.")
+                            time.sleep(0.5)
                             st.rerun()
 
+    with tab_csv:
+        st.subheader("📥 Importar productos desde CSV")
+        st.markdown("**Formato CSV** (separador `;` o `,`): cod_proveedor, cod_interno, nombre, medidas, color, unidad_medida, unidad_minima_compra, dia_pedido, dia_entrega, proveedor, precio, tipo_iva")
+        archivo_csv = st.file_uploader("Seleccionar CSV", type=["csv"], key="csv_pc_upload")
+        if archivo_csv:
+            try:
+                contenido_csv = archivo_csv.read().decode("utf-8")
+                sep_csv = ";" if ";" in contenido_csv.split("\n")[0] else ","
+                df_csv = pd.read_csv(io.StringIO(contenido_csv), sep=sep_csv, dtype=str).fillna("")
+                st.write(f"**{len(df_csv)} filas detectadas**")
+                st.dataframe(df_csv.head(10), use_container_width=True, hide_index=True)
+                if st.button("🚀 Importar productos", type="primary", key="btn_importar_csv"):
+                    import json as _json
+                    rows_j = []
+                    for _, row_c in df_csv.iterrows():
+                        rd = {}
+                        for col_c in df_csv.columns:
+                            val_c = str(row_c[col_c]).strip()
+                            rd[col_c.strip().lower()] = val_c if val_c else None
+                        rows_j.append(rd)
+                    try:
+                        res_csv = rpc_call("rpc_upsert_productos_compra_batch", {"p_rows": _json.dumps(rows_j)})
+                        r_csv = res_csv if isinstance(res_csv, dict) else (res_csv[0] if isinstance(res_csv, list) and res_csv else {})
+                        if r_csv.get("ok"):
+                            st.success(f"Importación completada: {r_csv.get('procesados', 0)} productos.")
+                            registrar_actividad("importar_csv", "ProductosCompra", {"filas": len(rows_j)})
+                        else:
+                            st.error(f"Error: {r_csv.get('error', 'Error desconocido')}")
+                    except Exception as e:
+                        st.error(f"Error en importación: {e}")
+            except Exception as e:
+                st.error(f"Error leyendo CSV: {e}")
+
+
+elif st.session_state.pantalla == "Locales":
+    if not user_has_access("Locales"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("🏪 Locales")
+
+    if "loc_modo" not in st.session_state:
+        st.session_state.loc_modo = "lista"
+    if "loc_edit_id" not in st.session_state:
+        st.session_state.loc_edit_id = None
+
+    col_al, _ = st.columns([1, 5])
+    with col_al:
+        if st.button("➕ Nuevo local", use_container_width=True):
+            st.session_state.loc_modo = "nuevo"
+            st.session_state.loc_edit_id = None
+            st.rerun()
+
+    if st.session_state.loc_modo in ("nuevo", "editar"):
+        es_ed_l = st.session_state.loc_modo == "editar"
+        st.subheader("✏️ Editar local" if es_ed_l else "➕ Nuevo local")
+        datos_l = {}
+        if es_ed_l and st.session_state.loc_edit_id:
+            rows_l = _supabase_get("locales_compra_v2", f"id=eq.{st.session_state.loc_edit_id}")
+            if rows_l:
+                datos_l = rows_l[0]
+        with st.form("form_local", clear_on_submit=False):
+            cl1, cl2 = st.columns(2)
+            with cl1:
+                loc_nombre = st.text_input("Nombre del local *", value=datos_l.get("nombre", ""))
+                loc_direccion = st.text_input("Dirección", value=datos_l.get("direccion", ""))
+            with cl2:
+                loc_telefono = st.text_input("Teléfono", value=datos_l.get("telefono", ""))
+                loc_transporte = st.text_input("Transporte", value=datos_l.get("transporte", ""), placeholder="Furgoneta propia, Mensajería...")
+            col_sl, col_cl = st.columns([1, 3])
+            with col_sl:
+                loc_sub = st.form_submit_button("💾 Guardar", use_container_width=True, type="primary")
+            with col_cl:
+                loc_can = st.form_submit_button("❌ Cancelar", use_container_width=True)
+        if loc_can:
+            st.session_state.loc_modo = "lista"
+            st.session_state.loc_edit_id = None
+            st.rerun()
+        if loc_sub:
+            if not loc_nombre.strip():
+                st.error("El nombre es obligatorio.")
+            else:
+                params_l = {"p_nombre": loc_nombre.strip(), "p_direccion": loc_direccion.strip() or None, "p_telefono": loc_telefono.strip() or None, "p_transporte": loc_transporte.strip() or None}
+                try:
+                    if es_ed_l:
+                        params_l["p_id"] = st.session_state.loc_edit_id
+                        res_l = rpc_call("rpc_actualizar_local_compra", params_l)
+                    else:
+                        res_l = rpc_call("rpc_crear_local_compra", params_l)
+                    r_l = res_l if isinstance(res_l, dict) else (res_l[0] if isinstance(res_l, list) and res_l else {})
+                    if r_l.get("ok"):
+                        st.success("Local guardado.")
+                        registrar_actividad("crear_local" if not es_ed_l else "editar_local", "Locales", {"nombre": loc_nombre})
+                        st.session_state.loc_modo = "lista"
+                        st.session_state.loc_edit_id = None
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {r_l.get('error', 'Error desconocido')}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+    else:
+        locales_list = _supabase_get("locales_compra_v2", "activo=eq.true&order=nombre.asc")
+        if not locales_list:
+            st.info("No hay locales registrados.")
+        else:
+            st.caption(f"{len(locales_list)} locales activos")
+            df_loc = pd.DataFrame(locales_list)
+            cl_s = [c for c in ["nombre", "direccion", "telefono", "transporte"] if c in df_loc.columns]
+            st.dataframe(df_loc[cl_s].rename(columns={"nombre": "Nombre", "direccion": "Dirección", "telefono": "Teléfono", "transporte": "Transporte"}), use_container_width=True, hide_index=True)
+            nms_l = {l["id"]: l["nombre"] for l in locales_list}
+            ops_l = [""] + [f"{v} (ID:{k})" for k, v in nms_l.items()]
+            sel_l = st.selectbox("Seleccionar local para editar", ops_l)
+            if sel_l:
+                lid = int(sel_l.split("ID:")[1].rstrip(")"))
+                cel, cdl = st.columns(2)
+                with cel:
+                    if st.button("✏️ Editar", use_container_width=True, key="btn_edit_loc"):
+                        st.session_state.loc_modo = "editar"
+                        st.session_state.loc_edit_id = lid
+                        st.rerun()
+                with cdl:
+                    if st.button("🗑️ Desactivar", use_container_width=True, key="btn_desact_loc"):
+                        rpc_call("rpc_actualizar_local_compra", {"p_id": lid, "p_activo": False})
+                        st.success("Local desactivado.")
+                        time.sleep(0.5)
+                        st.rerun()
+
+
+elif st.session_state.pantalla == "Stock":
+    if not user_has_access("Stock"):
+        st.error("No tienes acceso a esta sección.")
+        st.stop()
+    st.button("⬅️ VOLVER", on_click=ir_a, args=("Home",))
+    st.header("📦 Gestión de Stock")
+
+    stock_data = _supabase_get("vw_stock_actual", "order=producto_nombre.asc")
+    locales_data = _supabase_get("locales_compra_v2", "activo=eq.true&order=nombre.asc")
+    prods_data = _supabase_get("productos_compra_v2", "activo=eq.true&order=nombre.asc", "id,nombre,cod_interno,proveedor_id,unidad_medida,dia_pedido,dia_entrega,producto_venta_id")
+
+    stk_tabs = st.tabs(["📊 Por producto", "🏭 Por proveedor", "📈 Stock vs Sell-out", "🔮 Previsión semanal", "🔄 Traspasos", "✅ Regularización", "📜 Historial"])
+
+    # ── Tab 1: Stock por producto ──
+    with stk_tabs[0]:
+        st.subheader("Stock actual por producto")
+        if not stock_data:
+            st.info("No hay movimientos de stock registrados.")
+        else:
+            local_nms = ["Todos"] + [l["nombre"] for l in locales_data]
+            local_filt = st.selectbox("📍 Local", local_nms, key="stk_local_prod")
+            stk_view = stock_data if local_filt == "Todos" else [s for s in stock_data if s.get("local_nombre") == local_filt]
+            alertas = [s for s in stk_view if float(s.get("stock_actual", 0)) <= float(s.get("stock_minimo", 0)) and float(s.get("stock_minimo", 0)) > 0]
+            if alertas:
+                with st.expander(f"⚠️ {len(alertas)} productos bajo stock mínimo", expanded=True):
+                    for a in alertas:
+                        st.warning(f"**{a['producto_nombre']}** — Stock: {a['stock_actual']} {a.get('unidad_medida','')} (Mín: {a['stock_minimo']})")
+            tot_refs = len(set(s["producto_compra_id"] for s in stk_view))
+            tot_uds = sum(float(s.get("stock_actual", 0)) for s in stk_view)
+            tot_val = sum(float(s.get("stock_actual", 0)) * float(s.get("precio") or 0) for s in stk_view)
+            m1s, m2s, m3s, m4s = st.columns(4)
+            m1s.metric("Referencias", f"{tot_refs}")
+            m2s.metric("Unidades totales", f"{tot_uds:,.0f}")
+            m3s.metric("Valor estimado", f"{tot_val:,.2f} €")
+            m4s.metric("Alertas", f"{len(alertas)}")
+            df_stk = pd.DataFrame(stk_view)
+            stk_cols = [c for c in ["producto_nombre", "cod_interno", "local_nombre", "stock_actual", "stock_minimo", "unidad_medida", "proveedor_nombre", "ultimo_movimiento"] if c in df_stk.columns]
+            st.dataframe(df_stk[stk_cols].rename(columns={"producto_nombre": "Producto", "cod_interno": "Código", "local_nombre": "Local", "stock_actual": "Stock", "stock_minimo": "Mínimo", "unidad_medida": "Unidad", "proveedor_nombre": "Proveedor", "ultimo_movimiento": "Últ. movimiento"}), use_container_width=True, hide_index=True)
+
+            # Registrar movimiento rápido
+            st.divider()
+            st.subheader("📥 Registrar movimiento")
+            if prods_data and locales_data:
+                with st.form("form_mov_rapido", clear_on_submit=True):
+                    cm1, cm2, cm3 = st.columns(3)
+                    with cm1:
+                        mv_prod_ops = [f"{p.get('cod_interno', '')} - {p['nombre']}" for p in prods_data]
+                        mv_prod = st.selectbox("Producto", mv_prod_ops, key="mv_prod")
+                        mv_tipo = st.selectbox("Tipo", ["entrada", "salida", "merma"], key="mv_tipo")
+                    with cm2:
+                        mv_loc_ops = [l["nombre"] for l in locales_data]
+                        mv_loc = st.selectbox("Local", mv_loc_ops, key="mv_loc")
+                        mv_cant = st.number_input("Cantidad", min_value=0.01, step=1.0, key="mv_cant")
+                    with cm3:
+                        mv_motivo = st.text_input("Motivo", key="mv_motivo", placeholder="Recepción pedido, Merma...")
+                        mv_fecha = st.date_input("Fecha", value=datetime.date.today(), key="mv_fecha")
+                    mv_sub = st.form_submit_button("✅ Registrar movimiento", type="primary", use_container_width=True)
+                if mv_sub:
+                    mv_pid = prods_data[mv_prod_ops.index(mv_prod)]["id"]
+                    mv_lid = locales_data[mv_loc_ops.index(mv_loc)]["id"]
+                    mv_user = get_user()
+                    try:
+                        res_mv = rpc_call("rpc_registrar_movimiento_stock", {"p_producto_compra_id": mv_pid, "p_local_id": mv_lid, "p_tipo": mv_tipo, "p_cantidad": float(mv_cant), "p_motivo": mv_motivo.strip() or None, "p_fecha": mv_fecha.isoformat(), "p_usuario_id": mv_user["id"] if mv_user else None})
+                        r_mv = res_mv if isinstance(res_mv, dict) else (res_mv[0] if isinstance(res_mv, list) and res_mv else {})
+                        if r_mv.get("ok"):
+                            st.success(f"Movimiento registrado: {mv_tipo} de {mv_cant} uds.")
+                            registrar_actividad("registrar_movimiento", "Stock", {"tipo": mv_tipo, "cantidad": float(mv_cant)})
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {r_mv.get('error', 'Error desconocido')}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ── Tab 2: Por proveedor ──
+    with stk_tabs[1]:
+        st.subheader("Stock por proveedor")
+        if not stock_data:
+            st.info("Sin datos de stock.")
+        else:
+            por_prov = {}
+            for s in stock_data:
+                pnm = s.get("proveedor_nombre") or "Sin proveedor"
+                if pnm not in por_prov:
+                    por_prov[pnm] = {"refs": 0, "uds": 0, "val": 0}
+                por_prov[pnm]["refs"] += 1
+                por_prov[pnm]["uds"] += float(s.get("stock_actual", 0))
+                por_prov[pnm]["val"] += float(s.get("stock_actual", 0)) * float(s.get("precio") or 0)
+            rows_pp = [{"Proveedor": k, "Referencias": v["refs"], "Unidades": f"{v['uds']:,.0f}", "Valor (€)": f"{v['val']:,.2f}"} for k, v in sorted(por_prov.items())]
+            st.dataframe(pd.DataFrame(rows_pp), use_container_width=True, hide_index=True)
+
+    # ── Tab 3: Stock vs Sell-out ──
+    with stk_tabs[2]:
+        st.subheader("Stock vs Sell-out")
+        vinculados = [s for s in stock_data if s.get("producto_venta_id")] if stock_data else []
+        if not vinculados:
+            st.info("No hay productos de compra vinculados a productos de venta (producto_venta_id).")
+        else:
+            fecha_fin_so = datetime.date.today()
+            fecha_ini_so = fecha_fin_so - datetime.timedelta(days=30)
+            rows_so = []
+            for sv in vinculados:
+                vid = sv["producto_venta_id"]
+                try:
+                    ventas_so = _supabase_get("ventas_raw_v2", f"producto_id=eq.{vid}&fecha=gte.{fecha_ini_so.isoformat()}&fecha=lte.{fecha_fin_so.isoformat()}", "uds_vendidas")
+                    tot_v = sum(float(v.get("uds_vendidas", 0)) for v in ventas_so) if ventas_so else 0
+                    med_d = tot_v / 30 if tot_v > 0 else 0
+                    stk_a = float(sv.get("stock_actual", 0))
+                    dias_c = int(stk_a / med_d) if med_d > 0 else 999
+                    rows_so.append({"Producto": sv["producto_nombre"], "Stock": f"{stk_a:,.0f}", "Venta/día": f"{med_d:,.1f}", "Días cobertura": dias_c if dias_c < 999 else "∞", "Estado": "🔴 Crítico" if dias_c <= 2 else "🟡 Bajo" if dias_c <= 5 else "🟢 OK"})
+                except Exception:
+                    pass
+            if rows_so:
+                st.dataframe(pd.DataFrame(rows_so), use_container_width=True, hide_index=True)
+            else:
+                st.info("No se pudieron calcular datos de sell-out.")
+
+    # ── Tab 4: Previsión semanal (alarma inteligente) ──
+    with stk_tabs[3]:
+        st.subheader("🔮 Previsión semanal — Alarma inteligente")
+        st.caption("Punto de reorden = venta media diaria × lead time (día pedido → día entrega + 1 día seguridad)")
+        DIAS_SEM = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
+        hoy_prev = datetime.date.today()
+        rows_al = []
+        for sp in (stock_data or []):
+            vid_p = sp.get("producto_venta_id")
+            dp_str = sp.get("dia_pedido", "")
+            de_str = sp.get("dia_entrega", "")
+            if not vid_p or not dp_str or not de_str:
+                continue
+            dp_1 = dp_str.split(",")[0].strip()
+            de_1 = de_str.split(",")[0].strip()
+            dp_n = DIAS_SEM.get(dp_1)
+            de_n = DIAS_SEM.get(de_1)
+            if dp_n is None or de_n is None:
+                continue
+            lt = (de_n - dp_n) % 7
+            if lt == 0:
+                lt = 7
+            lt += 1
+            try:
+                fi_p = hoy_prev - datetime.timedelta(days=30)
+                v_p = _supabase_get("ventas_raw_v2", f"producto_id=eq.{vid_p}&fecha=gte.{fi_p.isoformat()}&fecha=lte.{hoy_prev.isoformat()}", "uds_vendidas")
+                tv_p = sum(float(v.get("uds_vendidas", 0)) for v in v_p) if v_p else 0
+                vm_p = tv_p / 30 if tv_p > 0 else 0
+            except Exception:
+                vm_p = 0
+            sa_p = float(sp.get("stock_actual", 0))
+            pr_p = vm_p * lt
+            nec_p = max(0, pr_p - sa_p)
+            if nec_p > 0 or sa_p <= pr_p:
+                rows_al.append({"Producto": sp["producto_nombre"], "Stock": f"{sa_p:,.0f}", "Venta/día": f"{vm_p:,.1f}", "Lead time": f"{lt}d", "Pto reorden": f"{pr_p:,.0f}", "Pedir": f"{int(np.ceil(nec_p)):,}", "Día pedido": dp_str, "Proveedor": sp.get("proveedor_nombre", "—"), "Urg": "🔴" if sa_p <= vm_p else "🟡" if sa_p <= pr_p else "🟢"})
+        if rows_al:
+            urg_ord = {"🔴": 0, "🟡": 1, "🟢": 2}
+            rows_al.sort(key=lambda r: urg_ord.get(r["Urg"], 3))
+            st.dataframe(pd.DataFrame(rows_al), use_container_width=True, hide_index=True)
+            nc = sum(1 for r in rows_al if r["Urg"] == "🔴")
+            nb = sum(1 for r in rows_al if r["Urg"] == "🟡")
+            ma1, ma2, ma3 = st.columns(3)
+            ma1.metric("Críticos", f"{nc}")
+            ma2.metric("Bajo mínimo", f"{nb}")
+            ma3.metric("Total a pedir", f"{len(rows_al)}")
+        else:
+            st.success("Todos los productos tienen stock suficiente.")
+
+    # ── Tab 5: Traspasos ──
+    with stk_tabs[4]:
+        st.subheader("🔄 Traspaso entre locales")
+        if not prods_data or len(locales_data) < 2:
+            st.info("Necesitas al menos 2 locales y 1 producto para traspasos.")
+        else:
+            with st.form("form_traspaso", clear_on_submit=True):
+                ct1, ct2 = st.columns(2)
+                with ct1:
+                    tr_prod_ops = [f"{p.get('cod_interno', '')} - {p['nombre']}" for p in prods_data]
+                    tr_prod = st.selectbox("Producto", tr_prod_ops, key="tr_prod")
+                    tr_origen = st.selectbox("Local origen", [l["nombre"] for l in locales_data], key="tr_orig")
+                with ct2:
+                    tr_cant = st.number_input("Cantidad", min_value=0.01, step=1.0, key="tr_cant")
+                    tr_destino = st.selectbox("Local destino", [l["nombre"] for l in locales_data], key="tr_dest")
+                tr_motivo = st.text_input("Motivo", key="tr_mot", placeholder="Reposición, Evento especial...")
+                tr_sub = st.form_submit_button("🔄 Ejecutar traspaso", type="primary", use_container_width=True)
+            if tr_sub:
+                if tr_origen == tr_destino:
+                    st.error("Origen y destino no pueden ser el mismo.")
+                else:
+                    tr_pid = prods_data[tr_prod_ops.index(tr_prod)]["id"]
+                    tr_oid = locales_data[[l["nombre"] for l in locales_data].index(tr_origen)]["id"]
+                    tr_did = locales_data[[l["nombre"] for l in locales_data].index(tr_destino)]["id"]
+                    tr_user = get_user()
+                    try:
+                        res_tr = rpc_call("rpc_traspaso_stock", {"p_producto_compra_id": tr_pid, "p_local_origen_id": tr_oid, "p_local_destino_id": tr_did, "p_cantidad": float(tr_cant), "p_motivo": tr_motivo.strip() or None, "p_fecha": datetime.date.today().isoformat(), "p_usuario_id": tr_user["id"] if tr_user else None})
+                        r_tr = res_tr if isinstance(res_tr, dict) else (res_tr[0] if isinstance(res_tr, list) and res_tr else {})
+                        if r_tr.get("ok"):
+                            st.success(f"Traspaso completado: {tr_cant} uds de {tr_origen} → {tr_destino}")
+                            registrar_actividad("traspaso_stock", "Stock", {"origen": tr_origen, "destino": tr_destino, "cantidad": float(tr_cant)})
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {r_tr.get('error', 'Error desconocido')}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            st.divider()
+            st.caption("Últimos traspasos")
+            trasp_hist = _supabase_get("stock_movimientos_v2", "tipo=eq.traspaso_salida&order=created_at.desc&limit=20", "id,producto_compra_id,local_id,local_destino_id,cantidad,motivo,fecha")
+            if trasp_hist:
+                pr_map = {p["id"]: p["nombre"] for p in prods_data}
+                lo_map = {l["id"]: l["nombre"] for l in locales_data}
+                rows_tr = [{"Fecha": t.get("fecha",""), "Producto": pr_map.get(t.get("producto_compra_id"),"?"), "Origen": lo_map.get(t.get("local_id"),"?"), "Destino": lo_map.get(t.get("local_destino_id"),"?"), "Cantidad": t.get("cantidad",0), "Motivo": t.get("motivo","")} for t in trasp_hist]
+                st.dataframe(pd.DataFrame(rows_tr), use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay traspasos registrados.")
+
+    # ── Tab 6: Regularización ──
+    with stk_tabs[5]:
+        st.subheader("✅ Regularización de stock (Inventario)")
+        st.caption("Introduce conteo real. El sistema calcula diferencias y crea ajustes.")
+        if not locales_data:
+            st.info("No hay locales registrados.")
+        else:
+            reg_local = st.selectbox("📍 Local a regularizar", [l["nombre"] for l in locales_data], key="reg_local")
+            reg_lid = locales_data[[l["nombre"] for l in locales_data].index(reg_local)]["id"]
+            stk_reg = [s for s in (stock_data or []) if s.get("local_id") == reg_lid]
+            if not stk_reg:
+                st.info("No hay stock registrado en este local.")
+            else:
+                st.write(f"**{len(stk_reg)} productos con stock en {reg_local}**")
+                with st.form("form_regularizacion"):
+                    conteos = {}
+                    for sr in stk_reg:
+                        sr_pid = sr["producto_compra_id"]
+                        sr_nom = sr["producto_nombre"]
+                        sr_stk = float(sr.get("stock_actual", 0))
+                        sr_ud = sr.get("unidad_medida", "uds")
+                        cr1, cr2, cr3 = st.columns([3, 1, 1])
+                        with cr1:
+                            st.write(f"**{sr_nom}** (sistema: {sr_stk:,.0f} {sr_ud})")
+                        with cr2:
+                            conteos[sr_pid] = st.number_input(f"Conteo", value=float(sr_stk), step=1.0, key=f"reg_{sr_pid}", label_visibility="collapsed")
+                        with cr3:
+                            dif = conteos[sr_pid] - sr_stk
+                            if dif != 0:
+                                col_d = "red" if dif < 0 else "green"
+                                st.markdown(f"<span style='color:{col_d};font-weight:bold'>{dif:+,.0f}</span>", unsafe_allow_html=True)
+                            else:
+                                st.write("—")
+                    reg_motivo = st.text_input("Motivo", value="Inventario físico", key="reg_motivo")
+                    reg_sub = st.form_submit_button("✅ Aplicar regularización", type="primary", use_container_width=True)
+                if reg_sub:
+                    import json as _json2
+                    ajustes = []
+                    for sr in stk_reg:
+                        sr_pid = sr["producto_compra_id"]
+                        ct = conteos.get(sr_pid, float(sr.get("stock_actual", 0)))
+                        if ct != float(sr.get("stock_actual", 0)):
+                            ajustes.append({"producto_compra_id": sr_pid, "local_id": reg_lid, "conteo_real": ct, "motivo": reg_motivo})
+                    if not ajustes:
+                        st.info("No hay diferencias que ajustar.")
+                    else:
+                        reg_user = get_user()
+                        try:
+                            res_rg = rpc_call("rpc_regularizar_stock", {"p_ajustes": _json2.dumps(ajustes), "p_usuario_id": reg_user["id"] if reg_user else None})
+                            r_rg = res_rg if isinstance(res_rg, dict) else (res_rg[0] if isinstance(res_rg, list) and res_rg else {})
+                            if r_rg.get("ok"):
+                                st.success(f"Regularización completada: {r_rg.get('ajustes_aplicados', 0)} ajustes.")
+                                registrar_actividad("regularizacion", "Stock", {"local": reg_local, "ajustes": r_rg.get('ajustes_aplicados', 0)})
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error(f"Error: {r_rg.get('error', 'Error desconocido')}")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+    # ── Tab 7: Historial ──
+    with stk_tabs[6]:
+        st.subheader("📜 Historial de movimientos")
+        hf1, hf2, hf3 = st.columns(3)
+        with hf1:
+            h_desde = st.date_input("Desde", value=datetime.date.today() - datetime.timedelta(days=30), key="hist_desde")
+        with hf2:
+            h_hasta = st.date_input("Hasta", value=datetime.date.today(), key="hist_hasta")
+        with hf3:
+            h_tipos = ["Todos", "entrada", "salida", "merma", "ajuste_positivo", "ajuste_negativo", "traspaso_entrada", "traspaso_salida", "venta_auto"]
+            h_tipo = st.selectbox("Tipo", h_tipos, key="hist_tipo")
+        h_params = f"fecha=gte.{h_desde.isoformat()}&fecha=lte.{h_hasta.isoformat()}&order=created_at.desc&limit=500"
+        if h_tipo != "Todos":
+            h_params += f"&tipo=eq.{h_tipo}"
+        movs = _supabase_get("stock_movimientos_v2", h_params, "id,producto_compra_id,local_id,tipo,cantidad,motivo,fecha,created_at")
+        if not movs:
+            st.info("No hay movimientos en el período seleccionado.")
+        else:
+            pr_m = {p["id"]: p["nombre"] for p in prods_data}
+            lo_m = {l["id"]: l["nombre"] for l in locales_data}
+            TIPO_E = {"entrada": "📥", "salida": "📤", "merma": "🗑️", "ajuste_positivo": "➕", "ajuste_negativo": "➖", "traspaso_entrada": "🔄📥", "traspaso_salida": "🔄📤", "venta_auto": "💰"}
+            rows_h = [{"Fecha": m.get("fecha",""), "Tipo": f"{TIPO_E.get(m.get('tipo',''),'')} {m.get('tipo','')}", "Producto": pr_m.get(m.get("producto_compra_id"),"?"), "Local": lo_m.get(m.get("local_id"),"?"), "Cantidad": m.get("cantidad",0), "Motivo": m.get("motivo","")} for m in movs]
+            st.caption(f"{len(rows_h)} movimientos")
+            st.dataframe(pd.DataFrame(rows_h), use_container_width=True, hide_index=True)
+            st.divider()
+            st.caption("Resumen por tipo")
+            resumen_h = {}
+            for m in movs:
+                t = m.get("tipo", "?")
+                resumen_h[t] = resumen_h.get(t, 0) + float(m.get("cantidad", 0))
+            st.dataframe(pd.DataFrame([{"Tipo": k, "Total": f"{v:,.0f}"} for k, v in sorted(resumen_h.items())]), use_container_width=True, hide_index=True)
 
 # =========================================================
 # EMPLEADOS
