@@ -107,6 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_stock_mov_fecha ON stock_movimientos_v2(fecha);
 -- ────────────────────────────────────────────────────────────
 -- 6. VISTA: vw_stock_actual
 -- ────────────────────────────────────────────────────────────
+DROP VIEW IF EXISTS vw_stock_actual;
 CREATE OR REPLACE VIEW vw_stock_actual AS
 SELECT
     sm.producto_compra_id,
