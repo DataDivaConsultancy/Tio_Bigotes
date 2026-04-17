@@ -438,8 +438,7 @@ def rpc_scalar(resp: Any, key: Optional[str] = None) -> Any:
             return resp[key]
         return resp
     return resp
-        return
-
+def _guardar_control_diario_batch(payloads):
     for p in payloads:
         rpc_call(
             "rpc_upsert_control_diario",
