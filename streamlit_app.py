@@ -16,6 +16,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from st_supabase_connection import SupabaseConnection
+from supabase import create_client, Client as SupabaseClient
 
 
 # =========================================================
@@ -220,6 +221,11 @@ try:
 except Exception as e:
     st.error(f"Error de conexión a Supabase: {e}")
     st.stop()
+
+# Cliente Supabase directo (para Auth)
+_sb_url = st.secrets["connections"]["supabase"]["url"]
+_sb_key = st.secrets["connections"]["supabase"]["key"]
+sb: SupabaseClient = create_client(_sb_url, _sb_key)
 
 
 # =========================================================
@@ -1032,6 +1038,27 @@ def generar_whatsapp_link(telefono: str, nombre: str, email: str, password: str)
     return f"https://wa.me/{phone.lstrip('+')}?text={urllib.parse.quote(msg)}"
 
 
+def _cargar_perfil_empleado(email: str) -> Optional[Dict[str, Any]]:
+    """Carga rol y permisos desde tb_v2.empleados por email."""
+    try:
+        res = conn.table("empleados_v2").select("*").eq("email", email.lower()).eq("activo", True).execute()
+        df = df_from_res(res)
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return {
+            "id": int(row["id"]),
+            "nombre": row.get("nombre", ""),
+            "email": email.lower(),
+            "telefono": row.get("telefono"),
+            "rol": row.get("rol", "dependiente"),
+            "permisos": row.get("permisos") or [],
+            "local_id": row.get("local_id"),
+        }
+    except Exception:
+        return None
+
+
 def registrar_actividad(accion: str, seccion: str, detalle: Optional[Dict[str, Any]] = None) -> None:
     """Registra una acción en el log de auditoría (fire-and-forget)."""
     user = st.session_state.get("auth_user")
@@ -1072,7 +1099,12 @@ def user_has_access(pantalla: str) -> bool:
 
 def cerrar_sesion() -> None:
     registrar_actividad("logout", "Auth")
+    try:
+        sb.auth.sign_out()
+    except Exception:
+        pass
     st.session_state.pop("auth_user", None)
+    st.session_state.pop("sb_session", None)
     st.session_state.pantalla = "Login"
 
 
@@ -1098,33 +1130,30 @@ def pantalla_login() -> None:
 
         if submit and email.strip() and password:
             try:
-                resp = rpc_call(
-                    "rpc_verificar_login",
-                    {"p_email": email.strip().lower(), "p_password_hash": hash_password(password)},
-                )
-                result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
+                auth_resp = sb.auth.sign_in_with_password({
+                    "email": email.strip().lower(),
+                    "password": password,
+                })
 
-                if result.get("ok"):
-                    st.session_state["auth_user"] = {
-                        "id": result["id"],
-                        "nombre": result["nombre"],
-                        "email": result["email"],
-                        "telefono": result.get("telefono"),
-                        "rol": result["rol"],
-                        "must_change_password": result.get("must_change_password", False),
-                        "permisos": result.get("permisos") or [],
-                        "local_id": result.get("local_id"),
-                    }
-                    registrar_actividad("login", "Auth", {"email": email.strip().lower()})
-                    if result.get("must_change_password"):
-                        st.session_state.pantalla = "CambiarPassword"
-                    else:
-                        st.session_state.pantalla = "Home"
-                    st.rerun()
-                else:
-                    st.error(result.get("error", "Error de autenticación"))
+                perfil = _cargar_perfil_empleado(email.strip())
+                if not perfil:
+                    st.error("Tu email no tiene un perfil de empleado activo. Contacta al administrador.")
+                    sb.auth.sign_out()
+                    return
+
+                st.session_state["auth_user"] = perfil
+                st.session_state["sb_session"] = auth_resp.session
+                registrar_actividad("login", "Auth", {"email": email.strip().lower()})
+                st.session_state.pantalla = "Home"
+                st.rerun()
             except Exception as e:
-                st.error(f"Error conectando: {e}")
+                msg = str(e).lower()
+                if "invalid" in msg or "credentials" in msg:
+                    st.error("Email o contraseña incorrectos.")
+                elif "email not confirmed" in msg:
+                    st.error("Tu email aún no fue confirmado. Revisá tu bandeja de entrada.")
+                else:
+                    st.error(f"Error de autenticación: {e}")
 
 
 def pantalla_cambiar_password(forzado: bool = False) -> None:
@@ -1139,13 +1168,12 @@ def pantalla_cambiar_password(forzado: bool = False) -> None:
         st.warning("Debes cambiar tu contraseña antes de continuar.")
 
     with st.form("cambiar_pwd_form"):
-        old_pwd = st.text_input("Contraseña actual", type="password")
         new_pwd = st.text_input("Nueva contraseña", type="password")
         confirm_pwd = st.text_input("Confirmar nueva contraseña", type="password")
         submit = st.form_submit_button("Cambiar contraseña")
 
     if submit:
-        if not old_pwd or not new_pwd:
+        if not new_pwd:
             st.error("Completa todos los campos.")
         elif new_pwd != confirm_pwd:
             st.error("Las contraseñas no coinciden.")
@@ -1153,34 +1181,21 @@ def pantalla_cambiar_password(forzado: bool = False) -> None:
             st.error("La contraseña debe tener al menos 6 caracteres.")
         else:
             try:
-                resp = rpc_call(
-                    "rpc_cambiar_password",
-                    {
-                        "p_user_id": user["id"],
-                        "p_old_hash": hash_password(old_pwd),
-                        "p_new_hash": hash_password(new_pwd),
-                    },
-                )
-                result = resp if isinstance(resp, dict) else (resp[0] if isinstance(resp, list) and resp else {})
-
-                if result.get("ok"):
-                    registrar_actividad("cambio_password", "Auth")
-                    st.session_state["auth_user"]["must_change_password"] = False
-                    st.session_state.pantalla = "Home"
-                    st.rerun()
-                else:
-                    st.error(result.get("error", "Error al cambiar contraseña"))
+                sb.auth.update_user({"password": new_pwd})
+                registrar_actividad("cambio_password", "Auth")
+                st.session_state.pantalla = "Home"
+                st.rerun()
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error cambiando contraseña: {e}")
 
 
 def pantalla_recuperar_password() -> None:
     st.title("🔑 Recuperar contraseña")
-    st.info("Introduce tu email. Si existe, te mostraremos un enlace de WhatsApp para contactar al administrador.")
+    st.info("Introduce tu email y te enviaremos un enlace para resetear tu contraseña.")
 
     with st.form("recuperar_form"):
         email = st.text_input("Email registrado")
-        submit = st.form_submit_button("Solicitar recuperación")
+        submit = st.form_submit_button("Enviar enlace de recuperación", use_container_width=True)
 
     if st.button("⬅️ Volver al login"):
         st.session_state.pantalla = "Login"
@@ -1188,50 +1203,10 @@ def pantalla_recuperar_password() -> None:
 
     if submit and email.strip():
         try:
-            res = (
-                conn.table("empleados_v2")
-                .select("id,nombre,telefono")
-                .eq("email", email.strip().lower())
-                .eq("activo", True)
-                .execute()
-            )
-            df = df_from_res(res)
-
-            if df.empty:
-                st.error("No se encontró un usuario activo con ese email.")
-            else:
-                # Buscar al superadmin para enviarle mensaje
-                res_admin = (
-                    conn.table("empleados_v2")
-                    .select("nombre,telefono")
-                    .eq("rol", "superadmin")
-                    .eq("activo", True)
-                    .limit(1)
-                    .execute()
-                )
-                df_admin = df_from_res(res_admin)
-
-                user_name = df.iloc[0]["nombre"]
-
-                if not df_admin.empty and df_admin.iloc[0].get("telefono"):
-                    admin_phone = df_admin.iloc[0]["telefono"]
-                    admin_name = df_admin.iloc[0]["nombre"]
-                    msg = (
-                        f"Hola {admin_name}, soy {user_name} ({email.strip()}).\n"
-                        f"He olvidado mi contraseña de Tío Bigotes. "
-                        f"¿Podrías resetearla por favor?"
-                    )
-                    phone = re.sub(r"[^\d+]", "", admin_phone)
-                    if not phone.startswith("+"):
-                        phone = f"+{phone}"
-                    link = f"https://wa.me/{phone.lstrip('+')}?text={urllib.parse.quote(msg)}"
-
-                    st.success(f"Contacta al administrador ({admin_name}) por WhatsApp para que resetee tu contraseña:")
-                    st.markdown(f"[Enviar WhatsApp al administrador]({link})")
-                else:
-                    st.warning("No se encontró un administrador con WhatsApp configurado. Contacta a tu encargado directamente.")
+            sb.auth.reset_password_for_email(email.strip().lower())
+            st.success("Si el email existe, recibirás un enlace de recuperación. Revisá tu bandeja de entrada y spam.")
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.success("Si el email existe, recibirás un enlace de recuperación. Revisá tu bandeja de entrada y spam.")
 
 
 # =========================================================
@@ -1267,12 +1242,8 @@ if not get_user():
     st.session_state.pantalla = "Login"
     st.rerun()
 
-# Forzar cambio de contraseña
-if get_user().get("must_change_password") and st.session_state.pantalla != "CambiarPassword":
-    st.session_state.pantalla = "CambiarPassword"
-
 if st.session_state.pantalla == "CambiarPassword":
-    pantalla_cambiar_password(forzado=get_user().get("must_change_password", False))
+    pantalla_cambiar_password()
     st.stop()
 
 
@@ -1560,11 +1531,18 @@ elif st.session_state.pantalla == "Empleados":
                     temp_pwd = generar_password_temporal()
                     permisos_list = [k for k, v in _permisos_sel.items() if v]
 
-                    # Superadmin siempre tiene todos los permisos
                     if rol == "superadmin":
                         permisos_list = list(PANTALLA_LABELS.keys())
 
                     try:
+                        # 1) Crear usuario en Supabase Auth
+                        sb.auth.admin.create_user({
+                            "email": email_nuevo.strip().lower(),
+                            "password": temp_pwd,
+                            "email_confirm": True,
+                        })
+
+                        # 2) Crear perfil en empleados
                         resp = rpc_call(
                             "rpc_crear_empleado_v2",
                             {
